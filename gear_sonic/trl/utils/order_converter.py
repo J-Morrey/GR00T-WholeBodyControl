@@ -93,41 +93,9 @@ class IsaacLabMuJoCoConverter(ABC):
         """Number of actuated DOFs (excluding root)."""
         return len(self.DOF_MAPPINGS[(self.VALID_DOF_ORDERS[0], self.VALID_DOF_ORDERS[1])])
 
-
-class G1Converter(IsaacLabMuJoCoConverter):
-    """G1 ordering converter.
-
-    Imports G1 body/DOF/joint mappings from gear_sonic.envs.manager_env.robots.g1.
-    """
-
-    def __init__(self):
-        # Lazy import to avoid circular dependency:
-        # order_converter -> g1 -> mdp/__init__ -> commands -> order_converter
-        from gear_sonic.envs.manager_env.robots.g1 import (
-            G1_ISAACLAB_JOINTS,
-            G1_ISAACLAB_TO_MUJOCO_BODY,
-            G1_ISAACLAB_TO_MUJOCO_DOF,
-            G1_MUJOCO_TO_ISAACLAB_BODY,
-            G1_MUJOCO_TO_ISAACLAB_DOF,
-        )
-
-        self.JOINT_NAMES = G1_ISAACLAB_JOINTS
-        self.DOF_MAPPINGS = {
-            ("isaaclab", "mujoco"): G1_ISAACLAB_TO_MUJOCO_DOF,
-            ("mujoco", "isaaclab"): G1_MUJOCO_TO_ISAACLAB_DOF,
-        }
-        self.BODY_MAPPINGS = {
-            ("isaaclab", "mujoco"): G1_ISAACLAB_TO_MUJOCO_BODY,
-            ("mujoco", "isaaclab"): G1_MUJOCO_TO_ISAACLAB_BODY,
-        }
-
-    # Body subset names for MPJPE metrics (used by reconstruction_trainer)
-    VR_3POINTS_BODY_NAMES = ["torso_link", "left_wrist_yaw_link", "right_wrist_yaw_link"]
-    FOOT_BODY_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
-
     @property
     def vr_3points_mujoco_indices(self):
-        """VR 3-point body indices in full (30-body) MuJoCo body order.
+        """VR 3-point body indices in full MuJoCo body order.
 
         These index into the full body array after isaaclab_to_mujoco_body
         reordering, NOT the 14-body motion.yaml body_names subset.
@@ -137,7 +105,7 @@ class G1Converter(IsaacLabMuJoCoConverter):
 
     @property
     def foot_mujoco_indices(self):
-        """Foot body indices in full (30-body) MuJoCo body order.
+        """Foot body indices in full MuJoCo body order.
 
         These index into the full body array after isaaclab_to_mujoco_body
         reordering, NOT the 14-body motion.yaml body_names subset.
@@ -176,6 +144,38 @@ class G1Converter(IsaacLabMuJoCoConverter):
         }
 
 
+class G1Converter(IsaacLabMuJoCoConverter):
+    """G1 ordering converter.
+
+    Imports G1 body/DOF/joint mappings from gear_sonic.envs.manager_env.robots.g1.
+    """
+
+    def __init__(self):
+        # Lazy import to avoid circular dependency:
+        # order_converter -> g1 -> mdp/__init__ -> commands -> order_converter
+        from gear_sonic.envs.manager_env.robots.g1 import (
+            G1_ISAACLAB_JOINTS,
+            G1_ISAACLAB_TO_MUJOCO_BODY,
+            G1_ISAACLAB_TO_MUJOCO_DOF,
+            G1_MUJOCO_TO_ISAACLAB_BODY,
+            G1_MUJOCO_TO_ISAACLAB_DOF,
+        )
+
+        self.JOINT_NAMES = G1_ISAACLAB_JOINTS
+        self.DOF_MAPPINGS = {
+            ("isaaclab", "mujoco"): G1_ISAACLAB_TO_MUJOCO_DOF,
+            ("mujoco", "isaaclab"): G1_MUJOCO_TO_ISAACLAB_DOF,
+        }
+        self.BODY_MAPPINGS = {
+            ("isaaclab", "mujoco"): G1_ISAACLAB_TO_MUJOCO_BODY,
+            ("mujoco", "isaaclab"): G1_MUJOCO_TO_ISAACLAB_BODY,
+        }
+
+    # Body subset names for MPJPE metrics (used by reconstruction_trainer)
+    VR_3POINTS_BODY_NAMES = ["torso_link", "left_wrist_yaw_link", "right_wrist_yaw_link"]
+    FOOT_BODY_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
+
+
 class H2Converter(IsaacLabMuJoCoConverter):
     """H2 robot joint/body order converter between IsaacLab and MuJoCo conventions."""
 
@@ -199,6 +199,34 @@ class H2Converter(IsaacLabMuJoCoConverter):
         }
 
     VR_3POINTS_BODY_NAMES = ["torso_link", "left_wrist_pitch_link", "right_wrist_pitch_link"]
+    FOOT_BODY_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
+
+
+class R1Converter(IsaacLabMuJoCoConverter):
+    """R1 robot joint/body order converter between IsaacLab and MuJoCo conventions."""
+
+    def __init__(self):
+        from gear_sonic.envs.manager_env.robots.r1 import (
+            R1_ISAACLAB_JOINTS,
+            R1_ISAACLAB_TO_MUJOCO_BODY,
+            R1_ISAACLAB_TO_MUJOCO_DOF,
+            R1_MUJOCO_TO_ISAACLAB_BODY,
+            R1_MUJOCO_TO_ISAACLAB_DOF,
+        )
+
+        self.JOINT_NAMES = R1_ISAACLAB_JOINTS
+        self.DOF_MAPPINGS = {
+            ("isaaclab", "mujoco"): R1_ISAACLAB_TO_MUJOCO_DOF,
+            ("mujoco", "isaaclab"): R1_MUJOCO_TO_ISAACLAB_DOF,
+        }
+        self.BODY_MAPPINGS = {
+            ("isaaclab", "mujoco"): R1_ISAACLAB_TO_MUJOCO_BODY,
+            ("mujoco", "isaaclab"): R1_MUJOCO_TO_ISAACLAB_BODY,
+        }
+
+    # R1 has no torso_link (waist_yaw_link is the equivalent) and one roll DOF
+    # per wrist rather than G1's roll/pitch/yaw.
+    VR_3POINTS_BODY_NAMES = ["waist_yaw_link", "left_wrist_roll_link", "right_wrist_roll_link"]
     FOOT_BODY_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
 
 
