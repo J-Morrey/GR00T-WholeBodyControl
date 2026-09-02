@@ -378,6 +378,25 @@ def main(config: OmegaConf):
         else:
             env.config["robot"]["actions_dim"] = env.env.action_space.shape[-1]
 
+        # Per-term layout of the concatenated policy/critic groups. The loop above
+        # skips them (they arrive as flat tensors, so only their total width is
+        # recorded), but cross-embodiment alignment needs to know where each term
+        # sits inside the flat vector.
+        obs_manager = env.env.observation_manager
+        env.config["obs"]["group_term_layout"] = {
+            group: [
+                # int() because IsaacLab reports dims as numpy int64, which
+                # OmegaConf rejects as a non-primitive type.
+                [name, [int(d) for d in dim]]
+                for name, dim in zip(
+                    obs_manager.active_terms[group],
+                    obs_manager.group_obs_term_dim[group],
+                    strict=True,
+                )
+            ]
+            for group in ("policy", "critic")
+        }
+
         policy = custom_instantiate(
             config.algo.config.actor,
             env_config=env.config,
@@ -438,6 +457,15 @@ def main(config: OmegaConf):
                 logger.info(f"Pretrained loading '{module_name}': missing keys: {missing}")
             if unexpected:
                 logger.info(f"Pretrained loading '{module_name}': unexpected keys: {unexpected}")
+
+    # Any2Any cross-embodiment transfer: load the source-embodiment checkpoint
+    # into the kinematically aligned model, then adapt only the dynamics-sensitive
+    # modules with LoRA. Must run before the trainer builds its optimizer, which
+    # captures exactly the parameters that are trainable at that moment.
+    if config.algo.config.get("any2any", None) is not None:
+        from gear_sonic.trl.modules.any2any import setup_any2any
+
+        setup_any2any(config.algo.config.any2any, policy, value_model, device)
 
     accelerator.wait_for_everyone()
 

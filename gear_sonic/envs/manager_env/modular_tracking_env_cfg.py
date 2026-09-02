@@ -1011,6 +1011,13 @@ class ModularTrackingEnvCfg(ManagerBasedRLEnvCfg):
                 "action_scale": r1.R1_ACTION_SCALE,
                 "isaaclab_to_mujoco_mapping": r1.R1_ISAACLAB_TO_MUJOCO_MAPPING,
             },
+            # Same robot as "r1", but with the G1-matched per-joint action scale
+            # the Any2Any-transferred policy expects.
+            "r1_any2any": {
+                "robot_cfg": r1.R1_CFG,
+                "action_scale": r1.R1_ACTION_SCALE_ANY2ANY,
+                "isaaclab_to_mujoco_mapping": r1.R1_ISAACLAB_TO_MUJOCO_MAPPING,
+            },
         }
 
         robot_type = config["robot"].get("type", "g1")

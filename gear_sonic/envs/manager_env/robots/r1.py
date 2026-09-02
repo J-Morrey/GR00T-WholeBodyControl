@@ -144,6 +144,16 @@ EFFORT_SHOULDER = 60.0
 EFFORT_ARM_DISTAL = 33.0
 EFFORT_HEAD = 33.0
 
+# Rotor inertia reflected at the joint. The holosoma config had these written out
+# but commented, so R1 was running with zero armature while G1 sets it on every
+# actuator group (0.0036-0.0251). Leaving it at zero makes a joint's effective
+# inertia just its link inertia -- R1's ankle_pitch_link is 0.071 kg -- so joint
+# accelerations blow up. That is what made the `feet_acc` reward (an L2 penalty on
+# ankle *joint* acceleration) ~10x larger on R1 than on G1 under the identical
+# -2.5e-6 weight the G1 release trained with. 0.01 is holosoma's own intended
+# value and sits inside G1's range.
+ARMATURE = 0.01
+
 R1_CFG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         fix_base=False,
@@ -216,24 +226,33 @@ R1_CFG = ArticulationCfg(
                 ".*_hip_pitch_joint": 5.0,
                 ".*_knee_joint": 5.0,
             },
+            armature={
+                ".*_hip_yaw_joint": ARMATURE,
+                ".*_hip_roll_joint": ARMATURE,
+                ".*_hip_pitch_joint": ARMATURE,
+                ".*_knee_joint": ARMATURE,
+            },
         ),
         "feet": ImplicitActuatorCfg(
             joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
             effort_limit_sim=EFFORT_ANKLE,
             stiffness={".*_ankle_pitch_joint": 20.0, ".*_ankle_roll_joint": 20.0},
             damping={".*_ankle_pitch_joint": 4.0, ".*_ankle_roll_joint": 4.0},
+            armature={".*_ankle_pitch_joint": ARMATURE, ".*_ankle_roll_joint": ARMATURE},
         ),
         "waist": ImplicitActuatorCfg(
             joint_names_expr=["waist_roll_joint", "waist_yaw_joint"],
             effort_limit_sim=EFFORT_WAIST,
             stiffness={"waist_roll_joint": 20.0, "waist_yaw_joint": 20.0},
             damping={"waist_roll_joint": 4.0, "waist_yaw_joint": 4.0},
+            armature={"waist_roll_joint": ARMATURE, "waist_yaw_joint": ARMATURE},
         ),
         "head": ImplicitActuatorCfg(
             joint_names_expr=["head_pitch_joint", "head_yaw_joint"],
             effort_limit_sim=EFFORT_HEAD,
             stiffness={"head_pitch_joint": 20.0, "head_yaw_joint": 20.0},
             damping={"head_pitch_joint": 4.0, "head_yaw_joint": 4.0},
+            armature={"head_pitch_joint": ARMATURE, "head_yaw_joint": ARMATURE},
         ),
         "arms": ImplicitActuatorCfg(
             joint_names_expr=[
@@ -264,6 +283,13 @@ R1_CFG = ArticulationCfg(
                 ".*_elbow_joint": 10.0,
                 ".*_wrist_roll_joint": 10.0,
             },
+            armature={
+                ".*_shoulder_pitch_joint": ARMATURE,
+                ".*_shoulder_roll_joint": ARMATURE,
+                ".*_shoulder_yaw_joint": ARMATURE,
+                ".*_elbow_joint": ARMATURE,
+                ".*_wrist_roll_joint": ARMATURE,
+            },
         ),
     },
 )
@@ -290,3 +316,35 @@ R1_ACTION_SCALE = {
     for actuator in R1_CFG.actuators.values()
     for joint_expr in actuator.joint_names_expr
 }
+
+
+def _g1_matched_action_scale() -> dict[str, float]:
+    """Per-joint action scale that mirrors the G1's, for Any2Any transfer.
+
+    A policy pretrained on the G1 emits actions calibrated to *its* per-joint
+    scales (``0.25 * effort / stiffness``, spanning 0.35-0.55 rad/unit). Giving
+    each matched R1 joint its G1 counterpart's scale makes the Any2Any action
+    gather a pure permutation **in radians**, so the pretrained output
+    distribution transfers without a hidden rescale for LoRA to undo.
+
+    All 24 matched joints share a canonical name with their G1 counterpart, so
+    each R1 joint is resolved directly against G1's regex-keyed scale dict. The
+    two head joints have no G1 counterpart and keep the R1 default.
+    """
+    import re
+
+    from gear_sonic.envs.manager_env.robots.g1 import G1_MODEL_12_ACTION_SCALE
+
+    scale = {}
+    for joint in R1_ISAACLAB_DOFS:
+        for pattern, value in G1_MODEL_12_ACTION_SCALE.items():
+            if re.fullmatch(pattern, joint):
+                scale[joint] = value
+                break
+        else:
+            scale[joint] = R1_DEFAULT_ACTION_SCALE
+    return scale
+
+
+#: Action scale for the Any2Any-adapted policy; see :func:`_g1_matched_action_scale`.
+R1_ACTION_SCALE_ANY2ANY = _g1_matched_action_scale()

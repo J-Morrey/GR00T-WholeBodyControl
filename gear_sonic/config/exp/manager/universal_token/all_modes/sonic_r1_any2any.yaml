@@ -1,0 +1,77 @@
+# @package _global_
+# Any2Any transfer of the pretrained Unitree G1 SONIC policy onto the R1.
+#
+# Rather than training R1 from scratch (sonic_r1.yaml), this reuses the released
+# 29-DOF G1 whole-body tracker:
+#   * Kinematic alignment scatters R1's 26-DOF observations into G1's 29-DOF
+#     layout and gathers the 29-dim action back onto R1's joints, so the entire
+#     pretrained checkpoint loads with zero shape mismatch.
+#   * LoRA adapts only the action decoder and the critic; the reference-motion
+#     encoders, the kinematic decoder and the FSQ bottleneck stay frozen, which
+#     is what preserves the source policy's motion prior.
+#
+# Everything about the environment -- rewards, terminations, observations,
+# domain randomization, motion data -- is inherited unchanged from sonic_r1.yaml,
+# so a run of this config is directly comparable to the from-scratch baseline.
+
+defaults:
+  # Path is relative to the `exp` config group root, not to this file.
+  - manager/universal_token/all_modes/sonic_r1
+  - _self_
+
+project_name: TRL_R1_Any2Any
+
+manager_env:
+  config:
+    robot:
+      # Same R1 robot, but with the G1-matched per-joint action scale. The
+      # pretrained decoder's output is calibrated to G1's 0.35-0.55 rad/unit
+      # scales, so this makes the action gather a pure permutation in radians.
+      type: r1_any2any
+
+algo:
+  config:
+    # PPO hyperparameters are deliberately NOT overridden here. The paper is
+    # explicit that the adaptation run keeps the action space, observations,
+    # rewards, PPO hyperparameters, motion sampling and domain randomization
+    # identical to the source pretraining, with only the kinematic alignment and
+    # LoRA differing.
+    #
+    # An earlier version of this config raised actor_learning_rate 2e-5 -> 1e-4
+    # ("LoRA wants a larger step") and max_grad_norm 0.1 -> 1.0 ("the global norm
+    # is smaller with 1% of params trainable"). Both sounded reasonable and both
+    # were wrong: together they make each update up to ~50x more aggressive than
+    # the setup the source policy was trained under, and the run reliably peaked
+    # around iteration 200 (episode length ~37) then decayed to length ~8 by
+    # iteration 1000 as the policy walked off the pretrained prior. Inherit the
+    # source values instead.
+
+    any2any:
+      path: sonic_release/last.pt
+      policy_state_dict_key: policy_state_dict
+      value_state_dict_key: value_state_dict
+      lora_rank: 16
+      lora_alpha: 32.0
+      # Exploration noise for R1's head joints, which no source joint drives and
+      # no reward observes -- pinned low so the head effectively holds still.
+      head_std: 1.0e-3
+      # Leave std at init_noise_std (0.05) rather than transplanting the source's
+      # converged ~0.34. Copying it explores 7x harder than the from-scratch
+      # baseline from step one, and the jitter penalties (action_rate_l2,
+      # feet_acc) grow with noise^2 -- measured at -0.61 feet_acc vs -0.05 for
+      # scratch, which buries the better tracking. Set true to reproduce that.
+      copy_source_std: false
+      # The released critic normalizer has a Welford count of ~7e10, so it would
+      # never adapt to R1's observation statistics. Reset it to a value that can
+      # still move while keeping the pretrained mean/var as a strong prior.
+      normalizer_reset_count: 1.0e6
+
+    actor:
+      backbone:
+        _target_: gear_sonic.trl.modules.any2any.Any2AnyBackbone
+        # SMPL wrist-joint selections on each side, in that robot's IsaacLab DOF
+        # order. G1 exposes both wrists' roll/pitch/yaw; R1 has roll only.
+        source_wrist_joint_idx: [23, 24, 25, 26, 27, 28]
+        target_wrist_joint_idx: [24, 25]
+    critic:
+      _target_: gear_sonic.trl.modules.any2any.Any2AnyCritic
