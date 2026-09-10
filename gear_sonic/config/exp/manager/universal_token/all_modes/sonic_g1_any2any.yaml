@@ -1,0 +1,78 @@
+# @package _global_
+# CONTROL: Any2Any "transfer" of the pretrained G1 policy back onto the G1.
+#
+# Source and target are the same robot, so Stage 1 (kinematic alignment) is the
+# identity -- scatter, gather, the default-pose offset and the wrist map are all
+# no-ops, verified at startup. What remains is exactly Stage 2: the LoRA
+# injection, the freeze pattern, the std handling, the critic-normalizer reset
+# and the checkpoint load path.
+#
+# That makes this a decisive test of the implementation rather than of the R1.
+# The source policy is already optimal for this robot on this data, so a correct
+# Stage 2 can only hold or mildly improve it. If episode length instead decays
+# the way it does on R1, the defect is in our transfer machinery and the
+# G1 -> R1 negative result is void; if it holds flat, Stage 2 is sound and the
+# R1 result stands as a genuine property of that embodiment pair.
+#
+# Requires SONIC_ANY2ANY_SOURCE=g1 SONIC_ANY2ANY_TARGET=g1 in the environment;
+# the run asserts the maps are the identity before training.
+#
+# Motion data is the same 1422 BONES-SEED clips used for R1, retargeted to G1
+# instead (/mnt/fast/g1_1pct_sonic), so data content is matched to the R1
+# experiment as well. One caveat: this run resident-loads 1024 of the 1422 (the
+# `min(num_envs, 1024)` cap in TrackingCommand, which the R1 runs did not hit),
+# with the im_resample callback rotating the set. That gives the control
+# slightly *less* data than R1 had, so it can only understate the control's
+# stability -- which is the safe direction for the conclusion drawn from it.
+
+defaults:
+  # Path is relative to the `exp` config group root, not to this file.
+  - manager/universal_token/all_modes/sonic_release
+  - _self_
+
+project_name: TRL_G1_Any2Any
+
+manager_env:
+  config:
+    robot:
+      # Unchanged from the release config. Because source == target, the action
+      # scale is already the one the pretrained decoder was calibrated to, so
+      # there is no r1_any2any-style remap to apply.
+      type: g1_model_12_dex
+  commands:
+    motion:
+      motion_lib_cfg:
+        # The G1 retargeting of the same 1422 clips the R1 run uses.
+        motion_file: /mnt/fast/g1_1pct_sonic
+        # No SMPL retargeting was extracted for this subset. The SMPL encoder
+        # still runs (and stays frozen); it just sees zeros, exactly as in the
+        # R1 runs, which keeps the two experiments comparable.
+        smpl_motion_file: dummy
+
+algo:
+  config:
+    # PPO hyperparameters inherited from sonic_release unchanged, for the same
+    # reason as sonic_r1_any2any: the paper adapts with the source's own
+    # settings, and raising them was previously shown to cause the decay it was
+    # meant to diagnose.
+
+    any2any:
+      path: sonic_release/last.pt
+      policy_state_dict_key: policy_state_dict
+      value_state_dict_key: value_state_dict
+      lora_rank: 16
+      lora_alpha: 32.0
+      # No target-only joints exist in the identity map, so this is unused here;
+      # kept so the block stays diffable against sonic_r1_any2any.yaml.
+      head_std: 1.0e-3
+      copy_source_std: false
+      normalizer_reset_count: 1.0e6
+
+    actor:
+      backbone:
+        _target_: gear_sonic.trl.modules.any2any.Any2AnyBackbone
+        # Identical on both sides: G1's two wrists' roll/pitch/yaw.
+        source_wrist_joint_idx: [23, 24, 25, 26, 27, 28]
+        target_wrist_joint_idx: [23, 24, 25, 26, 27, 28]
+    critic:
+      _target_: gear_sonic.trl.modules.any2any.Any2AnyCritic

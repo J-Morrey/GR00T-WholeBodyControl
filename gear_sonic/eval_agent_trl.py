@@ -458,6 +458,24 @@ def main(override_config: omegaconf.OmegaConf):
             logger.info("Transforming 'std' -> 'log_std' (applying log) for backward compatibility")
             state_dict["log_std"] = torch.log(state_dict.pop("std"))
 
+        # An Any2Any checkpoint already carries lora_A/lora_B, but the model was
+        # just built fresh from config and has none, so a strict load reports
+        # every adapter key as "unexpected". Inject the adapters first, exactly
+        # as setup_any2any does on resume, then load. Checkpoints without LoRA
+        # (e.g. the released source policy) are unaffected.
+        if any("lora_" in k for k in state_dict):
+            from gear_sonic.trl.modules.any2any import apply_any2any_lora
+
+            a2a = config.algo.config.get("any2any", {}) or {}
+            apply_any2any_lora(
+                model.policy,
+                model.value_model,
+                r=a2a.get("lora_rank", 16),
+                alpha=a2a.get("lora_alpha", 32.0),
+                train_std=a2a.get("train_std", False),
+            )
+            logger.info("Injected Any2Any LoRA adapters before loading the checkpoint")
+
         model.policy.load_state_dict(state_dict)
         logger.info("Successfully loaded policy state dict")
 

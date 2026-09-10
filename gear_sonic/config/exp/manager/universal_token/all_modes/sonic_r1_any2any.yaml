@@ -28,9 +28,59 @@ manager_env:
       # pretrained decoder's output is calibrated to G1's 0.35-0.55 rad/unit
       # scales, so this makes the action gather a pure permutation in radians.
       type: r1_any2any
+  commands:
+    motion:
+      # Route 100% of environments through the robot-motion (g1) encoder.
+      #
+      # Any2Any 3.2 scopes its Sonic experiments to "its Robot Motion Encoder,
+      # FSQ bottleneck, and dynamics decoder modules" -- one encoder, one
+      # decoder. all_mlp_v1 instantiates three encoders and two decoders, and
+      # because `smpl_motion_file` has no data here the SMPL branch is correctly
+      # disabled by `encoder_sample_probs_no_smpl` (commands.py:2896-2921),
+      # renormalising the split to g1 0.5 / teleop 0.5. So *half* of every
+      # rollout was driving the frozen prior through the teleop encoder, whose
+      # inputs are the least aligned in the pipeline: `command_multi_future_
+      # lower_body` is the one per-DOF term Stage 1 does not touch, and the VR
+      # 3-point targets are computed from R1's very different arm/torso geometry
+      # (hand-in-wrist offset 0.068 m vs G1's 0.18 m).
+      #
+      # Zeroing the probabilities rather than using the module's `active_encoders`
+      # kwarg is deliberate: `active_encoders` *skips instantiation*
+      # (universal_token_modules.py:274-276), so the teleop/smpl weights would
+      # come back as "unexpected" keys and `setup_any2any` would raise. Zeroed
+      # probabilities keep the modules loadable while never routing an env to
+      # them. Same reasoning for not using `active_decoders` on g1_kin
+      # (universal_token_modules.py:363-365 -- note the comment at L418 claiming
+      # decoders are kept for checkpoint compat is stale and does not match the
+      # code above it).
+      encoder_sample_probs:
+        g1: 1.0
+        teleop: 0.0
+        smpl: 0.0
 
 algo:
+  trl:
+    # Persist a local metric history. These runs previously kept none on disk,
+    # which is why the LR/std/reward analysis had to be reconstructed from
+    # checkpoint pickles at 50-200 iteration resolution.
+    #
+    # wandb stays live and unchanged: `use_wandb` is already true via opt/wandb,
+    # WandbCallback is in the base defaults and logs the scalar dict on every
+    # `on_log`, and train_agent_trl calls `wandb.init(sync_tensorboard=True)`, so
+    # the tfevents below are mirrored into the same run automatically.
+    report_to: tensorboard
+    logging_dir: ${experiment_dir}/tensorboard
+
   config:
+    # The five aux losses (g1_recon + 4 latent-alignment terms) flow only through
+    # the encoders, FSQ and g1_kin -- all frozen under Any2Any -- so their
+    # gradient contribution is exactly zero. They still cost three extra encoder
+    # passes per micro-batch and make the logged `loss` incomparable to the
+    # from-scratch run. `has_aux_loss: false` stops the backbone computing them at
+    # all (PolicyAndValueWrapper.forward_component gates on it); the trainer-side
+    # flag stops TRLAuxLossPPOTrainer adding them to the loss.
+    compute_aux_loss: false
+
     # PPO hyperparameters are deliberately NOT overridden here. The paper is
     # explicit that the adaptation run keeps the action space, observations,
     # rewards, PPO hyperparameters, motion sampling and domain randomization
@@ -55,18 +105,48 @@ algo:
       # Exploration noise for R1's head joints, which no source joint drives and
       # no reward observes -- pinned low so the head effectively holds still.
       head_std: 1.0e-3
-      # Leave std at init_noise_std (0.05) rather than transplanting the source's
-      # converged ~0.34. Copying it explores 7x harder than the from-scratch
-      # baseline from step one, and the jitter penalties (action_rate_l2,
-      # feet_acc) grow with noise^2 -- measured at -0.61 feet_acc vs -0.05 for
-      # scratch, which buries the better tracking. Set true to reproduce that.
-      copy_source_std: false
+      # Transplant the source checkpoint's converged std (~0.34) instead of
+      # leaving it at init_noise_std. This reverses an earlier decision, and the
+      # reversal is what this run tests.
+      #
+      # The earlier reasoning was that copying std "explores 7x harder than the
+      # from-scratch baseline" and inflates the jitter penalties. Checkpoint data
+      # from the two runs says otherwise:
+      #
+      #   sonic_r1_scratch_full-20260903_145050  std: 0.05 -> 0.164 (it 200)
+      #                                               -> 0.456 (it 2600, converged)
+      #   sonic_r1_any2any_poseoffset_s7-...     std: 0.0500, frozen, all ckpts
+      #
+      # The successful from-scratch run *converges at 0.456* -- more noise than
+      # the 0.34 we were declining to copy. So the jitter comparison was made
+      # against an early scratch run still sitting near 0.05-0.16, not a
+      # like-for-like one. R1 at high action noise is not the problem; it is what
+      # the working baseline does.
+      #
+      # The cost of the old setting is severe. KL ~ 1/sigma^2, so running at 0.05
+      # instead of 0.456 inflates every measured KL by (0.456/0.05)^2 ~= 83x
+      # against a desired_kl of 0.01 that was calibrated for the larger sigma. The
+      # adaptive controller responds by flooring the learning rate -- 1e-5 =
+      # adaptive_lr_min at all four Any2Any checkpoints, never once ticking up,
+      # while scratch oscillates 1.5e-5..5.9e-5. With the LR floored, PPO has no
+      # trust-region authority left and the adapter drifts monotonically off the
+      # prior (||(alpha/r)BA||/||W|| doubled, 0.44% -> 0.88%, over 150 iters).
+      #
+      # This is also why the earlier `train_std: true` attempt failed: std shares
+      # the single global LR, which was floored *because* sigma was small. Small
+      # sigma -> huge KL -> floored LR -> sigma cannot grow. Starting at 0.34
+      # breaks that loop before it closes.
+      #
+      # Success criterion for this run: `lr` comes off 1e-5 and starts
+      # oscillating the way the from-scratch run's does.
+      copy_source_std: true
       # The released critic normalizer has a Welford count of ~7e10, so it would
       # never adapt to R1's observation statistics. Reset it to a value that can
       # still move while keeping the pretrained mean/var as a strong prior.
       normalizer_reset_count: 1.0e6
 
     actor:
+      has_aux_loss: false
       backbone:
         _target_: gear_sonic.trl.modules.any2any.Any2AnyBackbone
         # SMPL wrist-joint selections on each side, in that robot's IsaacLab DOF

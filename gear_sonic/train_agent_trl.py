@@ -278,10 +278,23 @@ def main(config: OmegaConf):
 
         simulation_app = app_launcher.app
 
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cudnn.deterministic = False
+    # TF32 has a 10-bit mantissa (~1e-3 relative). The rollout forward runs at
+    # batch shape (num_envs, 1, .) while the PPO update runs at
+    # (mini_batch, num_steps_per_env, .), so the two use different GEMM kernels
+    # and different reduction orders. With a frozen policy (lr=0) that alone
+    # produces |mu_update - mu_rollout| ~ 6e-3 mean / 3.5e-1 max, i.e. a KL of
+    # ~0.011 between two *identical* parameter vectors -- above desired_kl, so
+    # the KL-adaptive LR controller is steering on numerical noise and the PPO
+    # importance ratio is corrupted. Set SONIC_DISABLE_TF32=1 to fall back to
+    # full fp32 and measure the difference.
+    _tf32 = os.environ.get("SONIC_DISABLE_TF32", "0") != "1"
+    torch.backends.cuda.matmul.allow_tf32 = _tf32
+    torch.backends.cudnn.allow_tf32 = _tf32
+    torch.backends.cudnn.deterministic = not _tf32
     torch.backends.cudnn.benchmark = False
+    if not _tf32:
+        torch.set_float32_matmul_precision("highest")
+        logger.warning("SONIC_DISABLE_TF32=1 -- TF32 off, fp32 matmuls, cudnn deterministic")
 
     from gear_sonic.utils.logging import HydraLoggerBridge
 

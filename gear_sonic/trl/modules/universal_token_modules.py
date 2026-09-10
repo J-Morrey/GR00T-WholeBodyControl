@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
+
 from loguru import logger
 import numpy as np
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from gear_sonic.trl.utils import common
 
@@ -646,6 +649,34 @@ class UniversalTokenModule(nn.Module):
         elif frame_mask is not None:
             frame_mask_enc = frame_mask
 
+        if os.environ.get("SONIC_FWD_DEBUG") and encoder_name == "g1" and encoder is not None:
+            _w0 = encoder.module[0]
+            _flat = encoder_input.reshape(*encoder_input.shape[:-2], encoder.input_dim)
+            self._dbg_enc = {
+                "03a_enc_input": encoder_input.detach().clone(),
+                "03b_enc_maskcount": torch.tensor(
+                    [-1.0 if encoder_mask is None else float(encoder_mask.sum())]
+                ),
+                # id() of the encoder module, and a checksum of its first weight,
+                # to rule out "different module" / "weights mutated".
+                "03c_enc_id": torch.tensor([float(id(encoder) % 1_000_000)]),
+                "03d_w0_checksum": _w0.weight.detach().double().abs().sum().reshape(1).clone(),
+                # first Linear evaluated explicitly on the identical input
+                "03e_layer0_out": F.linear(_flat, _w0.weight, _w0.bias).detach().clone(),
+                "03f_enc_input_contig": torch.tensor([float(encoder_input.is_contiguous())]),
+                # Is this call site running under torch.autocast? accelerate wraps
+                # the *prepared* model's forward in autocast when mixed precision
+                # is on, so calls routed through model.forward(...) would be in
+                # bf16/fp16 while direct calls on the same module stay fp32.
+                "03g_autocast_on": torch.tensor([float(torch.is_autocast_enabled())]),
+                "03h_autocast_dtype": torch.tensor(
+                    [float(str(torch.get_autocast_dtype("cuda")) == "torch.bfloat16")]
+                ),
+                "03i_layer0_dtype_is_fp32": torch.tensor(
+                    [float(F.linear(_flat, _w0.weight, _w0.bias).dtype == torch.float32)]
+                ),
+            }
+
         # encode using the provided encoder (with gradients enabled for end-to-end training)
         if encoder is not None:
             if frame_mask_enc is not None and self.encoder_mask_features.get(encoder_name):
@@ -898,6 +929,30 @@ class UniversalTokenModule(nn.Module):
         # Shape: (batch, seq, num_tokens, token_dim) -> (batch, seq, latent_dim)
         self._last_full_latent_flat = all_tokens.detach().view(*all_tokens.shape[:-2], -1)
 
+        # SONIC_FWD_DEBUG: snapshot the pipeline stages so two call paths can be
+        # diffed stage by stage (see _forward_model in ppo_trainer).
+        if os.environ.get("SONIC_FWD_DEBUG"):
+            self._dbg = {
+                "02_tokobs_cmd_mf": (
+                    tokenizer_obs["command_multi_future_nonflat"].detach().clone()
+                    if "command_multi_future_nonflat" in tokenizer_obs
+                    else None
+                ),
+                "03_encidx": (
+                    tokenizer_obs["encoder_index"].detach().clone()
+                    if "encoder_index" in tokenizer_obs
+                    else None
+                ),
+                "04_latent_g1": (
+                    encoded_latents["g1"].detach().clone() if "g1" in encoded_latents else None
+                ),
+                "05_tokens_g1": (
+                    encoded_tokens["g1"].detach().clone() if "g1" in encoded_tokens else None
+                ),
+                "06_all_tokens": all_tokens.detach().clone(),
+                "07_proprio": proprioception_input.detach().clone(),
+            }
+
         # decode action and motion
         decode_input_dict = {
             "token": all_tokens,
@@ -931,6 +986,11 @@ class UniversalTokenModule(nn.Module):
                 action_mean = torch.cat([action_mean, hand_action], dim=-1)
         else:
             action_mean = None
+
+        if os.environ.get("SONIC_FWD_DEBUG") and getattr(self, "_dbg", None) is not None:
+            self._dbg["08_action_src"] = (
+                None if action_mean is None else action_mean.detach().clone()
+            )
 
         # compute aux losses
         if compute_aux_loss:

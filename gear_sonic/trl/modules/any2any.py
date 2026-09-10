@@ -34,6 +34,7 @@ import ast
 import copy
 from dataclasses import dataclass
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -52,8 +53,12 @@ import torch.nn.functional as F
 _ROBOTS_DIR = Path(__file__).resolve().parents[2] / "envs" / "manager_env" / "robots"
 _MJCF_DIR = Path(__file__).resolve().parents[2] / "data" / "assets" / "robot_description" / "mjcf"
 
-SOURCE_ROBOT = "g1"
-TARGET_ROBOT = "r1"
+# The pair is read from the environment so a *control* transfer can be run
+# without touching the code: setting both to the same robot makes every map
+# below the identity, which isolates the Stage-2 LoRA/freeze machinery from the
+# Stage-1 alignment. Defaults reproduce the G1 -> R1 configuration.
+SOURCE_ROBOT = os.environ.get("SONIC_ANY2ANY_SOURCE", "g1")
+TARGET_ROBOT = os.environ.get("SONIC_ANY2ANY_TARGET", "r1")
 
 _SPEC = {
     "g1": ("g1.py", "G1_ISAACLAB_JOINTS", "g1_29dof_rev_1_0.xml"),
@@ -376,6 +381,26 @@ def _resolve_regex_dict(spec, joint_names, default=0.0):
     return out
 
 
+def _robot_pose_cfg(robot: str):
+    """Return ``(articulation_cfg, action_scale_dict)`` for a robot by name.
+
+    Imported lazily and per robot so this module stays importable outside a
+    running Isaac Sim app (the R1/G1 config modules pull in ``isaaclab``).
+    """
+    if robot == "g1":
+        from gear_sonic.envs.manager_env.robots.g1 import (
+            G1_CYLINDER_MODEL_12_DEX_CFG,
+            G1_MODEL_12_ACTION_SCALE,
+        )
+
+        return G1_CYLINDER_MODEL_12_DEX_CFG, G1_MODEL_12_ACTION_SCALE
+    if robot == "r1":
+        from gear_sonic.envs.manager_env.robots.r1 import R1_ACTION_SCALE_ANY2ANY, R1_CFG
+
+        return R1_CFG, R1_ACTION_SCALE_ANY2ANY
+    raise KeyError(f"no pose config registered for robot {robot!r}")
+
+
 def default_pose_offset():
     """Return (offset_src, action_scale_src): the source/target default-pose gap.
 
@@ -403,17 +428,12 @@ def default_pose_offset():
     Returns source-ordered tensors; the action-side correction is gathered to
     target order by the caller.
     """
-    from gear_sonic.envs.manager_env.robots.g1 import (
-        G1_CYLINDER_MODEL_12_DEX_CFG,
-        G1_MODEL_12_ACTION_SCALE,
-    )
-    from gear_sonic.envs.manager_env.robots.r1 import R1_CFG
+    src_cfg, scale_cfg = _robot_pose_cfg(SOURCE_ROBOT)
+    tgt_cfg, _ = _robot_pose_cfg(TARGET_ROBOT)
 
-    src_default = _resolve_regex_dict(
-        G1_CYLINDER_MODEL_12_DEX_CFG.init_state.joint_pos, SOURCE_DOF_NAMES
-    )
-    tgt_default = _resolve_regex_dict(R1_CFG.init_state.joint_pos, TARGET_DOF_NAMES)
-    scale_src = _resolve_regex_dict(G1_MODEL_12_ACTION_SCALE, SOURCE_DOF_NAMES, default=1.0)
+    src_default = _resolve_regex_dict(src_cfg.init_state.joint_pos, SOURCE_DOF_NAMES)
+    tgt_default = _resolve_regex_dict(tgt_cfg.init_state.joint_pos, TARGET_DOF_NAMES)
+    scale_src = _resolve_regex_dict(scale_cfg, SOURCE_DOF_NAMES, default=1.0)
 
     offset = [0.0] * NUM_SOURCE_DOF
     for tgt, src in MATCHED_PAIRS:
@@ -598,7 +618,15 @@ def inject_lora(
 
 
 def apply_any2any_lora(
-    policy, value_model, r: int = 16, alpha: float = 32.0, train_std: bool = False
+    policy,
+    value_model,
+    r: int = 16,
+    alpha: float = 32.0,
+    train_std: bool = False,
+    adapt_critic: bool = True,
+    actor_decoder_full: bool = False,
+    critic_full: bool = False,
+    full_finetune: bool = False,
 ) -> dict:
     """Inject LoRA into the dynamics-sensitive modules and freeze everything else.
 
@@ -609,14 +637,64 @@ def apply_any2any_lora(
     ``g1_kin`` and the (parameter-free) FSQ quantizer stay frozen, preserving the
     source policy's motion prior.
     """
+    if full_finetune:
+        # Paper's "Full FT (w align)" baseline: every parameter trainable from the
+        # source weights, no LoRA, nothing frozen -- including the reference
+        # encoders and g1_kin. The kinematic alignment still applies; only the
+        # dynamics-adaptation constraint is removed. This is the widest possible
+        # adaptation channel and therefore the last configuration in which
+        # transfer could still work.
+        for p in policy.parameters():
+            p.requires_grad_(True)
+        for p in value_model.parameters():
+            p.requires_grad_(True)
+        if not train_std:
+            for attr in ("std", "log_std"):
+                q = getattr(policy, attr, None)
+                if isinstance(q, nn.Parameter):
+                    q.requires_grad_(False)
+        trainable = sum(p.numel() for m in (policy, value_model) for p in m.parameters() if p.requires_grad)
+        total = sum(p.numel() for m in (policy, value_model) for p in m.parameters())
+        return {
+            "g1_dyn_linears_wrapped": 0,
+            "critic_linears_wrapped": 0,
+            "trainable_params": trainable,
+            "total_params": total,
+            "trainable_fraction": trainable / max(total, 1),
+        }
+
     for p in policy.parameters():
         p.requires_grad_(False)
-    for p in value_model.parameters():
-        p.requires_grad_(False)
 
-    n_dyn = inject_lora(policy.actor_module.decoders["g1_dyn"].module, r, alpha)
-    # S7: critic *backbone* only -- not its input projection or value head.
-    n_critic = inject_lora(value_model.critic_module.module, r, alpha, skip_endpoints=True)
+    if actor_decoder_full:
+        # Widen the adaptation channel: train the whole action decoder directly
+        # instead of a rank-r update. Encoders, g1_kin and FSQ stay frozen, so the
+        # reference-encoding path is still the pretrained one.
+        for p in policy.actor_module.decoders["g1_dyn"].parameters():
+            p.requires_grad_(True)
+        n_dyn = 0
+    else:
+        n_dyn = inject_lora(policy.actor_module.decoders["g1_dyn"].module, r, alpha)
+
+    if critic_full:
+        for p in value_model.parameters():
+            p.requires_grad_(True)
+        n_critic = 0
+    elif adapt_critic:
+        for p in value_model.parameters():
+            p.requires_grad_(False)
+        # S7: critic *backbone* only -- not its input projection or value head.
+        n_critic = inject_lora(value_model.critic_module.module, r, alpha, skip_endpoints=True)
+    else:
+        # Fresh critic: train it outright. LoRA exists to protect a behavioural
+        # prior, which the *actor* has and the critic does not -- the critic is
+        # discarded at deployment and its target (reward-to-go under the target
+        # robot's dynamics, for a different policy) has changed completely. A
+        # rank-16 update on five middle layers is a severe and unjustified
+        # constraint on a function that has to be relearned.
+        for p in value_model.parameters():
+            p.requires_grad_(True)
+        n_critic = 0
 
     # Exploration std stays FROZEN by default, matching the paper's "freeze
     # everything but LoRA".
@@ -728,6 +806,13 @@ def _build_backbone_cls():
             aligned["tokenizer"] = align_tokenizer_group(
                 input_data["tokenizer"], self._tgt_tokenizer_layout, self._src_from_tgt, self._wrist_map
             )
+            if os.environ.get("SONIC_FWD_DEBUG"):
+                self._dbg_in = {
+                    "00_raw_actor_obs": input_data["actor_obs"].detach().clone(),
+                    "00_raw_tokenizer": input_data["tokenizer"].detach().clone(),
+                    "01_aligned_actor_obs": actor.detach().clone(),
+                    "01_aligned_tokenizer": aligned["tokenizer"].detach().clone(),
+                }
             return aligned
 
         def _to_target_action(self, action_src):
@@ -877,6 +962,12 @@ def setup_any2any(cfg, policy, value_model, device) -> dict:
     #   * an ANY2ANY checkpoint from a previous run of this pipeline -- it already
     #     contains lora_A/lora_B and a target-shaped `std`, so the adapters must
     #     exist *before* loading or every lora_* key comes back "unexpected".
+    # A fresh critic is randomly initialised and fully trainable: skip its
+    # checkpoint load, its LoRA, and the normalizer reset. It also takes the
+    # target robot's native critic_obs (no g1-ification, no zero-padded columns),
+    # since there is no pretrained critic whose input layout must be matched.
+    fresh_critic = bool(cfg.get("fresh_critic", False))
+
     resuming = any("lora_" in k for k in psd) or any("lora_" in k for k in vsd)
     if resuming:
         stats = apply_any2any_lora(
@@ -909,13 +1000,19 @@ def setup_any2any(cfg, policy, value_model, device) -> dict:
             f"Any2Any policy load mismatch -- missing={missing[:8]} unexpected={unexpected[:8]}. "
             "The aligned model must match the source checkpoint exactly."
         )
-    v_missing, v_unexpected = value_model.load_state_dict(vsd, strict=False)
-    v_missing = [m for m in v_missing if "lora_" not in m]
-    if v_missing or v_unexpected:
-        raise RuntimeError(
-            f"Any2Any critic load mismatch -- missing={v_missing[:8]} unexpected={v_unexpected[:8]}."
+    if fresh_critic:
+        logger.info(
+            f"Any2Any: loaded {len(psd)} policy tensors, zero mismatch; "
+            f"critic left at RANDOM INIT and fully trainable ({len(vsd)} source critic tensors ignored)"
         )
-    logger.info(f"Any2Any: loaded {len(psd)} policy + {len(vsd)} critic tensors, zero mismatch")
+    else:
+        v_missing, v_unexpected = value_model.load_state_dict(vsd, strict=False)
+        v_missing = [m for m in v_missing if "lora_" not in m]
+        if v_missing or v_unexpected:
+            raise RuntimeError(
+                f"Any2Any critic load mismatch -- missing={v_missing[:8]} unexpected={v_unexpected[:8]}."
+            )
+        logger.info(f"Any2Any: loaded {len(psd)} policy + {len(vsd)} critic tensors, zero mismatch")
 
     if source_std is not None and hasattr(policy, "std"):
         copy_std = bool(cfg.get("copy_source_std", False))
@@ -936,6 +1033,8 @@ def setup_any2any(cfg, policy, value_model, device) -> dict:
     # so it would never adapt to the target robot's observation statistics.
     rms = getattr(value_model, "running_mean_std", None)
     reset_count = cfg.get("normalizer_reset_count", 1e6)
+    if fresh_critic:
+        rms = None  # a fresh normalizer already starts empty and adapts to the target
     if rms is not None and reset_count:
         old = float(rms.count)
         with torch.no_grad():
@@ -948,6 +1047,15 @@ def setup_any2any(cfg, policy, value_model, device) -> dict:
         r=cfg.get("lora_rank", 16),
         alpha=cfg.get("lora_alpha", 32.0),
         train_std=cfg.get("train_std", False),
+        # `adapt_critic: false` keeps the pretrained critic loaded but leaves it
+        # entirely untrainable (no LoRA, no gradients). One optimizer learning
+        # rate drives both parameter groups, so trainability is the only way to
+        # hold the critic fixed while the actor adapts -- which is what isolates
+        # an actor-side defect from a critic-side one.
+        adapt_critic=bool(cfg.get("adapt_critic", True)) and not fresh_critic,
+        full_finetune=bool(cfg.get("full_finetune", False)),
+        actor_decoder_full=bool(cfg.get("actor_decoder_full", False)),
+        critic_full=bool(cfg.get("critic_full", False)) or fresh_critic,
     )
     logger.info(
         f"Any2Any: LoRA r={cfg.get('lora_rank', 16)} on "

@@ -749,6 +749,20 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         self.imgaug_bc_loss_coef = self.config.get("imgaug_bc_loss_coef", 1.0)
         self.imgaug_bc_loss_fn = torch.nn.MSELoss()
 
+        # DIAGNOSTIC NULL CONTROL. Randomly permutes each micro-batch's advantages
+        # so they no longer correspond to the (state, action) that produced them.
+        # The marginal advantage distribution is untouched, so the update has the
+        # same scale and the KL controller behaves the same way -- only the
+        # *information* is destroyed. If a run with this enabled is statistically
+        # indistinguishable from one without, the advantages carried no usable
+        # learning signal and PPO was diffusing rather than optimising.
+        self.shuffle_advantages = self.config.get("shuffle_advantages", False)
+        if self.shuffle_advantages:
+            logger.warning(  # noqa: F405
+                "shuffle_advantages=True -- advantages are being PERMUTED. "
+                "This is a diagnostic null control and destroys learning."
+            )
+
     def _setup_storage(self):
         """Allocate rollout storage buffers and episode tracking accumulators.
 
@@ -1106,6 +1120,9 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         self.ratio_stats = ratio_stats
         self.advantage_mean_stats = advantage_mean_stats
         self.advantage_std_stats = advantage_std_stats
+        # Per-microbatch gradient norms, drained once per iteration in
+        # `_get_train_metrics`.
+        self._grad_norm_accum = []
         if self.use_symmetry:
             estimation_loss_stats = torch.zeros(stats_shape, device=device)
             swap_loss_stats = torch.zeros(stats_shape, device=device)
@@ -1221,6 +1238,13 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             for key in rollout_data["all_obs_dict"].keys()  # noqa: SIM118
         }
         mb_advantage = rollout_data["advantages"][micro_batch_inds]
+        if self.shuffle_advantages:
+            # Null control: break the (state, action) <-> advantage correspondence
+            # while preserving the marginal distribution. Permute over the
+            # flattened batch*seq axis so no temporal structure survives either.
+            flat = mb_advantage.reshape(-1, mb_advantage.shape[-1])
+            perm = torch.randperm(flat.shape[0], device=flat.device)
+            mb_advantage = flat[perm].reshape(mb_advantage.shape)
         mb_logprobs = rollout_data["logprobs"][micro_batch_inds]
         mb_return = rollout_data["returns"][micro_batch_inds]
         mb_values = rollout_data["values"][micro_batch_inds]
@@ -1270,6 +1294,20 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         mb_actions = mb_rollout_data["mb_actions"]
         episode_attnmask = mb_rollout_data["episode_attnmask"]
 
+        # Snapshot BEFORE the wrapped forward, so we can tell whether the obs or
+        # the parameters change underneath act().
+        _dbg_pre = None
+        if os.environ.get("SONIC_FWD_DEBUG") and getattr(self, "_fwd_dbg", 0) < int(
+            os.environ.get("SONIC_FWD_DEBUG_N", 6)
+        ):
+            _pol = self.accelerator.unwrap_model(model).policy
+            with torch.no_grad():
+                _dbg_pre = (
+                    _pol.forward(mb_obs_dict, is_training=False).clone(),
+                    {k: v.clone() for k, v in mb_obs_dict.items()},
+                    _pol.get_std.clone(),
+                )
+
         # We should only do one forward pass for especially DDP model
         if self.compute_imgaug_bc_loss:
             results = model.forward(
@@ -1298,6 +1336,142 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                     },
                 )
                 policy_results = results["policy"]
+        # SONIC_FWD_DEBUG=1 localises the rollout/update forward inconsistency.
+        # The rollout runs under model.eval() at shape (num_envs, 1, .); the update
+        # runs under model.train() at (mini_batch, num_steps_per_env, .). This
+        # isolates which of those two differences moves the action mean.
+        if os.environ.get("SONIC_FWD_DEBUG"):
+            self._fwd_dbg = getattr(self, "_fwd_dbg", 0) + 1
+            if self._fwd_dbg <= int(os.environ.get("SONIC_FWD_DEBUG_N", 6)):
+                pol = self.accelerator.unwrap_model(model).policy
+
+                def _snap(_p=None):
+                    """Copy the per-stage caches left by the last forward."""
+                    bb = pol.actor_module
+                    out = {}
+                    for attr in ("_dbg_in", "_dbg_enc", "_dbg"):
+                        for k, v in (getattr(bb, attr, None) or {}).items():
+                            if v is not None:
+                                out[k] = v.detach().float().cpu()
+                    return out
+
+                with torch.no_grad():
+                    # PATH A: through the wrapper -- what PPO actually optimises.
+                    rA = model.forward(
+                        modes=["policy"],
+                        input_kwargs={
+                            "policy": {
+                                "obs_dict": mb_obs_dict,
+                                "actions": mb_actions,
+                                "episode_attnmask": episode_attnmask,
+                            }
+                        },
+                    )
+                    snapA = _snap()
+                    muA = rA["policy"]["action_mean"].detach().float().cpu()
+                    # PATH B: direct call on the same module.
+                    muB = (
+                        pol.forward(
+                            mb_obs_dict, episode_attnmask=episode_attnmask, is_training=True
+                        )
+                        .detach()
+                        .float()
+                        .cpu()
+                    )
+                    snapB = _snap()
+                print(f"  [STAGE {self._fwd_dbg}] wrapper-path vs direct-path")  # noqa: T201
+                for k in sorted(set(snapA) & set(snapB)):
+                    a, b = snapA[k], snapB[k]
+                    if a.shape != b.shape:
+                        print(f"    {k:<26} SHAPE {tuple(a.shape)} vs {tuple(b.shape)}")  # noqa: T201
+                        continue
+                    d = (a - b).abs()
+                    print(  # noqa: T201
+                        f"    {k:<26} max={float(d.max()):.3e}  mean={float(d.mean()):.3e}"
+                        f"  nonzero={float((d > 0).float().mean()) * 100:.2f}%"
+                    )
+                d = (muA - muB).abs()
+                print(  # noqa: T201
+                    f"    {'09_action_tgt':<26} max={float(d.max()):.3e}  mean={float(d.mean()):.3e}"
+                )
+
+                was_training = pol.training
+                with torch.no_grad():
+                    mu_train = pol.forward(mb_obs_dict, is_training=False)
+                    pol.eval()
+                    mu_eval = pol.forward(mb_obs_dict, is_training=False)
+                    flat = {
+                        k: v.reshape(-1, 1, v.shape[-1]) for k, v in mb_obs_dict.items()
+                    }
+                    mu_flat = pol.forward(flat, is_training=False).reshape(mu_eval.shape)
+                    pol.train(was_training)
+                    d_mode = (mu_train - mu_eval).abs()
+                    d_shape = (mu_eval - mu_flat).abs()
+                    d_old = (mu_train - mb_rollout_data["mb_old_mu"]).abs()
+                    # The one that matters: what `act()` actually put into
+                    # policy_results, versus a plain forward on the same obs.
+                    mu_act = policy_results["action_mean"]
+                    d_act = (mu_act - mu_train).abs()
+                    d_act_old = (mu_act - mb_rollout_data["mb_old_mu"]).abs()
+                    # Split act() from forward(): is_training flag, and a fresh
+                    # act() call on the same obs to test for run-to-run variation.
+                    mu_tr_flag = pol.forward(mb_obs_dict, is_training=True)
+                    pol.act(obs_dict=mb_obs_dict, episode_attnmask=episode_attnmask)
+                    mu_act2 = pol.action_mean
+                    obs_changed = max(
+                        float((mb_obs_dict[k] - v).abs().max()) for k, v in _dbg_pre[1].items()
+                    )
+                    # Re-run through the WRAPPED model exactly as forward_component
+                    # does, to see whether the wrapped path itself is what differs.
+                    r2 = model.forward(
+                        modes=["policy"],
+                        input_kwargs={
+                            "policy": {
+                                "obs_dict": mb_obs_dict,
+                                "actions": mb_actions,
+                                "episode_attnmask": episode_attnmask,
+                            }
+                        },
+                    )
+                    mu_wrapped = r2["policy"]["action_mean"]
+                    inner = self.accelerator.unwrap_model(model)
+                    wp = dict(model.policy.named_parameters())
+                    ip = dict(inner.policy.named_parameters())
+                    pdiff = max(
+                        (float((wp[k] - ip[k]).abs().max()) for k in wp if k in ip), default=-1.0
+                    )
+                    same_ids = sum(1 for k in wp if k in ip and wp[k] is ip[k])
+                    print(  # noqa: T201
+                        f"    [WRAP] wrapped#2-vs-act#1 max={(mu_wrapped-mu_act).abs().max():.3e} | "
+                        f"wrapped#2-vs-fwd max={(mu_wrapped-mu_train).abs().max():.3e}\n"
+                        f"    [IDENT] type(model)={type(model).__name__} "
+                        f"type(inner)={type(inner).__name__} model_is_inner={model is inner} "
+                        f"policy_is={model.policy is inner.policy} "
+                        f"shared_param_tensors={same_ids}/{len(wp)} max_param_diff={pdiff:.3e} "
+                        f"| policy_id={id(model.policy)} inner_id={id(inner.policy)} "
+                        f"trainer_policy_id={id(self.policy_model)}",
+                        flush=True,
+                    )
+                    print(  # noqa: T201
+                        f"    [SPLIT] has_aux_loss={pol.has_aux_loss} "
+                        f"is_training(T-vs-F) max={(mu_tr_flag-mu_train).abs().max():.3e} | "
+                        f"act#2-vs-act#1 max={(mu_act2-mu_act).abs().max():.3e} | "
+                        f"PRE-fwd-vs-POST-fwd max={(_dbg_pre[0]-mu_train).abs().max():.3e} | "
+                        f"PRE-fwd-vs-act#1 max={(_dbg_pre[0]-mu_act).abs().max():.3e} | "
+                        f"obs_changed max={obs_changed:.3e} | "
+                        f"std_changed max={float((pol.get_std-_dbg_pre[2]).abs().max()):.3e}",
+                        flush=True,
+                    )
+                print(  # noqa: T201
+                    f"[FWD_DBG {self._fwd_dbg}] train-vs-eval max={d_mode.max():.3e} | "
+                    f"shape max={d_shape.max():.3e} | fwd-vs-old_mu mean={d_old.mean():.3e} "
+                    f"max={d_old.max():.3e} || act-vs-fwd mean={d_act.mean():.3e} "
+                    f"max={d_act.max():.3e} | act-vs-old_mu mean={d_act_old.mean():.3e} "
+                    f"max={d_act_old.max():.3e} | shapes act{tuple(mu_act.shape)} "
+                    f"fwd{tuple(mu_train.shape)} old{tuple(mb_rollout_data['mb_old_mu'].shape)}",
+                    flush=True,
+                )
+
         return {
             "policy_results": policy_results,
             "value_results": results["value"],
@@ -1381,6 +1555,37 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             local_kl_mean = torch.mean(kl)
             kl_mean = self.accelerator.gather(local_kl_mean).mean()
             self._adjust_learning_rate_based_on_kl(kl_mean, optimizer)
+
+            # SONIC_KL_DEBUG=1 splits the KL into its sigma and mu halves. With
+            # frozen weights the rollout and the update must agree exactly, so a
+            # nonzero term here localises a rollout/update inconsistency -- the
+            # thing that makes the PPO importance ratio meaningless.
+            if os.environ.get("SONIC_KL_DEBUG"):
+                self._kl_dbg = getattr(self, "_kl_dbg", 0) + 1
+                if self._kl_dbg <= int(os.environ.get("SONIC_KL_DEBUG_N", 8)):
+                    dmu = (mu_batch - mb_old_mu).abs()
+                    ratio_s = sigma_batch / mb_old_sigma
+                    kl_sigma = torch.sum(
+                        torch.log(ratio_s + 1.0e-5)
+                        + torch.square(mb_old_sigma) / (2.0 * torch.square(sigma_batch))
+                        - 0.5,
+                        axis=-1,
+                    ).mean()
+                    kl_mu = torch.sum(
+                        torch.square(mb_old_mu - mu_batch) / (2.0 * torch.square(sigma_batch)),
+                        axis=-1,
+                    ).mean()
+                    # print, not logger: this module's `logger` comes from the
+                    # transformers.trainer star-import and sits at WARNING, so
+                    # logger.info here is silently dropped.
+                    print(  # noqa: T201
+                        f"[KL_DBG {self._kl_dbg}] kl={local_kl_mean:.4f} = sigma_part "
+                        f"{kl_sigma:.4f} + mu_part {kl_mu:.4f} | |dmu| mean={dmu.mean():.3e} "
+                        f"max={dmu.max():.3e} | sigma new={sigma_batch.mean():.5f} "
+                        f"old={mb_old_sigma.mean():.5f} ratio={ratio_s.mean():.5f} | "
+                        f"mu{tuple(mu_batch.shape)} old_mu{tuple(mb_old_mu.shape)}",
+                        flush=True,
+                    )
 
         # Forward a DDP model twice will cause the error: "one of the variables needed for gradient computation has been modified by an inplace operation"  # noqa: E501
         vpred = value_results
@@ -1629,6 +1834,32 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             self.accelerator.gather_for_metrics(self.advantage_std_stats).mean().item()
         )
         metrics["objective/entropy"] = metrics["loss/entropy_avg"]
+
+        # --- critic health / advantage signal diagnostics -------------------
+        # These are floats, not tensors, on purpose: TensorBoardCallback silently
+        # drops anything that is not int/float (see the sanitisation note in
+        # `log`), which is why the per-term Episode_Reward metrics never reached
+        # tensorboard.
+        if getattr(self, "_explained_var", None) is not None:
+            metrics["critic/explained_variance"] = float(self._explained_var)
+            metrics["critic/return_std"] = float(self._return_std)
+            metrics["critic/raw_advantage_mean"] = float(self._raw_adv_mean)
+            metrics["critic/raw_advantage_std"] = float(self._raw_adv_std)
+            metrics["critic/raw_advantage_absmean"] = float(self._raw_adv_absmean)
+            # |A| / std(returns): the scale-free version. If the critic is
+            # separating actions at all this should be O(0.1-1); near zero means
+            # the advantages are dominated by value-estimation error.
+            metrics["critic/adv_to_return_ratio"] = float(
+                self._raw_adv_absmean / (self._return_std + 1e-8)
+            )
+        if getattr(self, "_grad_norm_accum", None):
+            g = np.array(self._grad_norm_accum, dtype=np.float64)
+            metrics["grad/norm_mean"] = float(g.mean())
+            metrics["grad/norm_max"] = float(g.max())
+            # Fraction of updates where the clip actually bound.
+            metrics["grad/clip_active_frac"] = float((g > self.args.max_grad_norm).mean())
+            self._grad_norm_accum = []
+        metrics["diag/shuffle_advantages"] = float(self.shuffle_advantages)
 
         return metrics
 
@@ -2027,19 +2258,31 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                     "train", start_time, num_tokens=self.state.num_input_tokens_seen
                 )
 
-        # Sanitize all caller logs at this boundary: rank 0 stores only detached CPU/Python values.
-        if self.state.is_world_process_zero:
-            output = {}
-            for key, value in logs.items():
-                if isinstance(value, torch.Tensor):
-                    value = value.detach().cpu().item()
-                elif isinstance(value, np.ndarray):
-                    value = float(value)
-                output[key] = value
-            output["step"] = self.state.global_step
-            self.state.log_history.append(output)
+        # Sanitize all caller logs at this boundary: detached CPU/Python values only.
+        #
+        # The sanitised dict is now what gets handed to the callbacks. Previously
+        # the *raw* dict was, and since `process_ep_infos` returns 0-dim
+        # torch.Tensors, HF's TensorBoardCallback rejected every one of them
+        # ("attempting to log a value of type <class 'torch.Tensor'> ... so we
+        # dropped this attribute") -- which silently cost us all 12 per-term
+        # Episode_Reward curves and all 5 Episode_Termination curves. wandb
+        # coerced them, so wandb had the data and tensorboard did not.
+        sanitized = {}
+        for key, value in logs.items():
+            if isinstance(value, torch.Tensor):
+                if value.numel() != 1:
+                    continue  # genuinely non-scalar; nothing sensible to log
+                value = value.detach().cpu().item()
+            elif isinstance(value, np.ndarray):
+                if value.size != 1:
+                    continue
+                value = float(value)
+            sanitized[key] = value
 
-        self.control = self.callback_handler.on_log(self.args, self.state, self.control, logs)
+        if self.state.is_world_process_zero:
+            self.state.log_history.append({**sanitized, "step": self.state.global_step})
+
+        self.control = self.callback_handler.on_log(self.args, self.state, self.control, sanitized)
 
     def _gradient_clipping(self):
         """Clip gradients and detect NaN/Inf, skipping the update if found.
@@ -2091,6 +2334,13 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             else:
                 grad_norm = _grad_norm
 
+        # Accumulate for logging. `max_grad_norm` (0.1 here) was calibrated against
+        # a ~42M-parameter gradient; with ~0.4M trainable LoRA parameters the global
+        # norm is far smaller, so we need to see whether the clip is still binding.
+        if grad_norm is not None:
+            g = float(grad_norm) if not hasattr(grad_norm, "item") else float(grad_norm.item())
+            self._grad_norm_accum.append(g)
+
         return grad_norm
 
     def _compute_returns(self, values, last_values, policy_state_dict):
@@ -2135,6 +2385,28 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
 
         # Compute and normalize the advantages
         advantages = returns - values
+
+        # Raw advantage scale, captured BEFORE normalization. The `val/advantage_*`
+        # metrics are computed after the normalization below, so they are (0, 1) by
+        # construction and carry no information. This is the scale that actually
+        # says whether the critic is separating good actions from bad ones.
+        with torch.no_grad():
+            self._raw_adv_mean = advantages.mean().detach()
+            self._raw_adv_std = advantages.std().detach()
+            self._raw_adv_absmean = advantages.abs().mean().detach()
+            # Explained variance of the ROLLOUT critic against the realised
+            # returns: 1 - Var(returns - values) / Var(returns). This is the
+            # standard PPO health metric and the one thing that says whether the
+            # advantages are signal or noise. EV ~ 0 => the critic explains
+            # nothing and every advantage is estimation error.
+            var_ret = returns.var()
+            self._explained_var = (
+                1.0 - (returns - values).var() / (var_ret + 1e-8)
+                if var_ret > 0
+                else torch.zeros((), device=returns.device)
+            ).detach()
+            self._return_std = returns.std().detach()
+
         if self.sync_advantage_normalization:
             # gather advantages from all processes before normalization
             advantages = self.accelerator.gather(advantages)

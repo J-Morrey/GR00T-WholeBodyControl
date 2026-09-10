@@ -16,3 +16,37 @@ max_grad_norm: ${algo.config.max_grad_norm}
 lr_scheduler_type: constant
 save_strategy: 'no'
 disable_tqdm: True
+
+# CORRECTNESS FIX -- do not remove without reading below.
+#
+# trl.PPOConfig defaults bf16=True. HF TrainingArguments.__post_init__ then sets
+# ACCELERATE_MIXED_PRECISION=bf16, so the Accelerator comes up with
+# mixed_precision="bf16" and `accelerator.prepare(model)` wraps the *prepared*
+# model's forward in torch.autocast(bfloat16).
+#
+# The PPO update calls `model.forward(...)` on the prepared model -> bf16.
+# The rollout calls the policy via `unwrap_model_for_generation(...)`, which
+# unwraps past that autocast wrapper -> fp32.
+#
+# So the policy that generates the rollout is NOT the policy that PPO evaluates
+# during the update. Measured with a frozen policy (actor_learning_rate=0, so no
+# parameter ever changes):
+#
+#   bf16=True : first Linear differs on 100% of elements (max 4.8e-2)
+#               -> encoder latent differs 1.06e-2
+#               -> FSQ flips a bin on 0.71% of token elements (step = 2/32)
+#               -> action mean differs 6.2e-3 mean / 3.5e-1 max
+#               -> KL = 0.0113 between the policy and ITSELF
+#   bf16=False: every stage bit-identical (0.0e+00); KL = 0.0003, which is just
+#               the 26 * log(1 + 1e-5) epsilon in the KL formula.
+#
+# desired_kl is 0.01, so with bf16 the noise floor sat ABOVE the target: the
+# KL-adaptive LR controller was steering on arithmetic, and the PPO importance
+# ratio exp(new_logp - old_logp) was corrupted by a ~1-sigma perturbation on its
+# worst elements. This affects every run, including train-from-scratch; it is
+# merely survivable there because real policy change dwarfs the noise, whereas
+# when adapting an already-good policy the intended update is smaller than it.
+#
+# Speed-preserving alternative (not taken): keep bf16 and wrap the rollout
+# forward in the same autocast context so both sides agree.
+bf16: false
