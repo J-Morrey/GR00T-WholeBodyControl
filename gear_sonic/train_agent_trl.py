@@ -215,7 +215,16 @@ def main(config: OmegaConf):
             project=project_name,
             entity=config.wandb.wandb_entity,
             name=run_name,
-            sync_tensorboard=True,
+            # sync_tensorboard deliberately OFF. `WandbCallback.on_log` already
+            # forwards the full metric dict with an explicit `step=global_step`,
+            # so once `report_to: tensorboard` started emitting real tfevents the
+            # sync became a second, redundant path into the same run -- every
+            # metric arrived twice and wandb's internal `_step` advanced twice per
+            # training iteration. Measured: `_step` 7018 at trainer iteration 3510,
+            # exactly 2.00x, which made runs look twice as far along as they were.
+            # (Runs predating `report_to: tensorboard` had nothing to sync, so the
+            # ratio was 1x -- e.g. scratch_full logged 2627 steps for 2600 iters.)
+            # Either path alone is sufficient; the callback is the explicit one.
             config=unresolved_conf,
             dir=wandb_dir,
             id=config.wandb.wandb_id,
