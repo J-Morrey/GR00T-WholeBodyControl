@@ -90,3 +90,73 @@ def get_group_term_obs_shape(example_obs, group_name):
         group_obs_dims[key] = tuple(value.shape[1:])
         group_obs_total_dim += np.prod(group_obs_dims[key]).item()
     return group_obs_dims, group_obs_names, group_obs_total_dim
+
+
+def populate_env_obs_config(env):
+    """Write the runtime observation/action dimensions into ``env.config``.
+
+    Call this once, after the env is created and *before* instantiating anything
+    that sizes itself from ``env.config`` (actor, critic, backbones).
+
+    This is not optional bookkeeping. A run's saved ``config.yaml`` is written
+    unresolved and before the env exists, so in every checkpoint
+    ``obs.obs_dims``, ``obs.group_obs_dims``, ``obs.group_obs_names`` and
+    ``robot.algo_obs_dim_dict`` are empty dicts and ``obs.group_term_layout`` is
+    absent entirely. Only the live IsaacLab env can supply them, which is why
+    both the training and evaluation entry points have to call this.
+
+    Populates:
+        obs.obs_dims, obs.group_obs_dims, obs.group_obs_names,
+        robot.algo_obs_dim_dict, robot.actions_dim, obs.group_term_layout
+
+    Args:
+        env: The manager-env wrapper, exposing ``.config``, ``.env.observation_space``,
+            ``.env.observation_manager``, ``.env.action_space`` and ``.reset()``.
+    """
+    obs_space = env.env.observation_space
+
+    env.config["obs"]["obs_dims"]["actor_obs"] = obs_space["policy"].shape[-1]
+    env.config["obs"]["obs_dims"]["critic_obs"] = obs_space["critic"].shape[-1]
+    env.config["robot"]["algo_obs_dim_dict"]["actor_obs"] = obs_space["policy"].shape[-1]
+    env.config["robot"]["algo_obs_dim_dict"]["critic_obs"] = obs_space["critic"].shape[-1]
+
+    example_obs = env.reset(flatten_dict_obs=False)
+    for key in obs_space:
+        if key in ("policy", "critic"):
+            continue
+        group_obs_dims, group_obs_names, group_obs_total_dim = get_group_term_obs_shape(
+            example_obs, key
+        )
+        env.config["obs"]["group_obs_dims"][key] = group_obs_dims
+        env.config["obs"]["group_obs_names"][key] = group_obs_names
+        env.config["obs"]["obs_dims"][key] = group_obs_total_dim
+        env.config["robot"]["algo_obs_dim_dict"][key] = group_obs_total_dim
+
+    # Read meta_action_dim off env.config rather than config.manager_env.config:
+    # env.config is the *resolved* container of the latter, so an interpolated
+    # value resolves here but would arrive as a raw node there. The env wrapper
+    # itself reads it this way.
+    meta_action_dim = env.config.get("meta_action_dim", None)
+    if meta_action_dim is not None and meta_action_dim > 0:
+        env.config["robot"]["actions_dim"] = meta_action_dim
+    else:
+        env.config["robot"]["actions_dim"] = env.env.action_space.shape[-1]
+
+    # Per-term layout of the concatenated policy/critic groups. The loop above
+    # skips them (they arrive as flat tensors, so only their total width is
+    # recorded), but cross-embodiment alignment needs to know where each term
+    # sits inside the flat vector.
+    obs_manager = env.env.observation_manager
+    env.config["obs"]["group_term_layout"] = {
+        group: [
+            # int() because IsaacLab reports dims as numpy int64, which
+            # OmegaConf rejects as a non-primitive type.
+            [name, [int(d) for d in dim]]
+            for name, dim in zip(
+                obs_manager.active_terms[group],
+                obs_manager.group_obs_term_dim[group],
+                strict=True,
+            )
+        ]
+        for group in ("policy", "critic")
+    }

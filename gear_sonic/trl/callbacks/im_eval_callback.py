@@ -2,6 +2,7 @@ from datetime import datetime
 import gc
 import json
 import os
+import re
 import time
 
 import numpy as np
@@ -102,6 +103,142 @@ def create_html_table(metrics_dict):
 </script>
 """
     return wandb.Html(html)
+
+
+#: Bodies making up the ``legs`` eval subset, when not supplied by config.
+_LEGS_PATTERN = ".*(hip|knee|ankle).*"
+
+#: Emission order of the body subsets. Preserved so the metric column order in
+#: ``metrics_all_contactnate`` matches what it was when these were hardcoded.
+_EVAL_SUBSET_ORDER = ("legs", "vr_3points", "other_upper_bodies", "foot")
+
+
+def _match_body_names(patterns, candidates):
+    """Resolve body-name patterns (exact or regex) against ``candidates``.
+
+    Mirrors ``gear_sonic.envs.manager_env.mdp.terminations._resolve_matching_names``
+    -- same semantics (fullmatch, order-preserving, de-duplicated) -- but
+    reimplemented here rather than imported. Importing that module pulls in
+    IsaacLab (``pxr``), which would make this resolver unusable outside a running
+    Isaac Sim app and so untestable without a GPU. Eighteen duplicated lines is a
+    cheaper price than that coupling.
+    """
+    if isinstance(patterns, str | bytes):
+        patterns = [patterns]
+    resolved = []
+    for pattern in patterns:
+        if pattern == ".*":
+            resolved.extend(candidates)
+            continue
+        regex = re.compile(pattern)
+        resolved.extend([name for name in candidates if regex.fullmatch(name)])
+    seen, ordered_unique = set(), []
+    for name in resolved:
+        if name not in seen:
+            ordered_unique.append(name)
+            seen.add(name)
+    return ordered_unique
+
+
+def resolve_eval_body_subsets(
+    body_names,
+    *,
+    vr_3point_body=None,
+    feet_body_names=None,
+    min_subset_size: int = 2,
+):
+    """Map each eval body subset to ascending indices into ``body_names``.
+
+    Replaces four hardcoded G1 name lists, which made this callback crash on any
+    other embodiment (R1 names the torso ``waist_yaw_link``, not ``torso_link``).
+
+    **Ascending index order is load-bearing.** ``compute_metrics_lite`` takes
+    ``root_idx=0`` and subtracts that body from every other one before computing
+    ``mpjpe_l``, so the metric depends on which body lands at subset index 0.
+    Emitting in ``body_names`` order reproduces the previous G1 subsets exactly --
+    including ``vr_3points``, whose config order (wristL, wristR, torso) differs
+    from the order the hardcoded list used (torso, wristL, wristR).
+
+    **Resolution must depend on config only, never on run-time data.** The caller
+    gathers a ``(..., metric_size)`` tensor across ranks and reshapes by
+    ``metric_size``, so every rank must resolve the same subsets. Deciding to skip
+    a subset based on observed values (NaN checks, tensor shapes, try/except
+    around the metric computation) would deadlock or silently corrupt that
+    reshape. Hydra config is identical across ranks; run-time data is not.
+
+    Args:
+        body_names: The tracked body list, i.e. ``TrackingCommand.cmd_body_names``.
+        vr_3point_body: ``cfg.vr_3point_body`` if set; already per-embodiment.
+        feet_body_names: ``cfg.feet_body_names`` if set; already per-embodiment.
+        min_subset_size: Drop a subset resolving to fewer bodies than this. At one
+            body ``mpjpe_l`` is identically zero and ``p_mpjpe`` divides by a zero
+            norm, producing NaN that would propagate through the gather.
+
+    Returns:
+        ``(subsets, warnings)``. ``subsets`` maps subset name -> ascending index
+        list; a subset that resolved to too few bodies is **absent**. ``warnings``
+        is a list of human-readable strings for the caller to log.
+    """
+    body_names = list(body_names)
+    index_of = {name: i for i, name in enumerate(body_names)}
+    warnings: list[str] = []
+
+    def _to_indices(names, subset):
+        """Names -> ascending indices, warning about (and dropping) unknowns."""
+        idx = []
+        for name in names:
+            if name in index_of:
+                idx.append(index_of[name])
+            else:
+                warnings.append(
+                    f"eval body subset {subset!r}: {name!r} is not in body_names; dropping it. "
+                    f"body_names={body_names}"
+                )
+        return sorted(set(idx))
+
+    if vr_3point_body:
+        vr_idx = _to_indices(list(vr_3point_body), "vr_3points")
+    else:
+        vr_idx = []
+        warnings.append("cfg.vr_3point_body is empty; 'vr_3points' metrics unavailable.")
+
+    if feet_body_names:
+        foot_idx = _to_indices(list(feet_body_names), "foot")
+    else:
+        foot_idx = _to_indices(_match_body_names(".*ankle.*", body_names), "foot")
+
+    legs_idx = _to_indices(_match_body_names(_LEGS_PATTERN, body_names), "legs")
+
+    # Complement, not a positive shoulder/elbow/root rule: an unrecognised body on
+    # a future embodiment then gets absorbed here rather than silently dropped
+    # from every subset, which keeps legs | vr_3points | other == body_names.
+    other_idx = sorted(set(range(len(body_names))) - set(legs_idx) - set(vr_idx))
+
+    candidates = {
+        "legs": legs_idx,
+        "vr_3points": vr_idx,
+        "other_upper_bodies": other_idx,
+        "foot": foot_idx,
+    }
+
+    covered = set(legs_idx) | set(vr_idx) | set(other_idx)
+    if covered != set(range(len(body_names))):
+        raise AssertionError(
+            "eval body subsets must partition body_names; "
+            f"covered {sorted(covered)} of {len(body_names)}"
+        )
+
+    subsets = {}
+    for name in _EVAL_SUBSET_ORDER:
+        idx = candidates[name]
+        if len(idx) < min_subset_size:
+            warnings.append(
+                f"eval body subset {name!r} resolved to {len(idx)} body(ies) "
+                f"{[body_names[i] for i in idx]}; skipping its metrics for this run."
+            )
+            continue
+        subsets[name] = idx
+    return subsets, warnings
 
 
 class ImEvalCallback(TrainerCallback):
@@ -300,6 +437,43 @@ class ImEvalCallback(TrainerCallback):
         )
         self.obj_pos_error, self.obj_pos_error_all = [], []
         self.obj_ori_error, self.obj_ori_error_all = [], []
+
+    def _eval_body_subsets(self):
+        """Resolve the per-embodiment body subsets used for the sliced metrics.
+
+        Thin adapter over :func:`resolve_eval_body_subsets`; the resolution itself
+        is a pure function so it can be unit-tested without IsaacSim.
+        """
+        motion_command = getattr(self.env, "motion_command", None)
+        if motion_command is None:
+            # NOTE: the previous check here was hasattr(self.env, "motion_command"),
+            # which is True even when the attribute is None -- as
+            # manager_env_wrapper.py sets it when the scene has no motion term --
+            # so this fell through to an AttributeError instead of a clear message.
+            raise RuntimeError(
+                "ImEvalCallback needs env.motion_command to resolve body subsets, "
+                "but it is None (no 'motion' command term in this environment)."
+            )
+
+        cfg = motion_command.cfg
+        subsets, warnings = resolve_eval_body_subsets(
+            motion_command.cmd_body_names,
+            # getattr: feet_body_names is a plain class attribute on the cfg, not
+            # a dataclass field, and need not exist on every cfg subclass.
+            vr_3point_body=getattr(cfg, "vr_3point_body", None),
+            feet_body_names=getattr(cfg, "feet_body_names", None),
+        )
+        for msg in warnings:
+            print(f"[ImEvalCallback] WARNING: {msg}")  # noqa: T201
+
+        body_names = list(motion_command.cmd_body_names)
+        summary = ", ".join(f"{k}({len(v)})" for k, v in subsets.items())
+        print(  # noqa: T201
+            f"[ImEvalCallback] body subsets: {summary} over {len(body_names)} tracked bodies"
+        )
+        for name, idx in subsets.items():
+            print(f"[ImEvalCallback]   {name}: {[body_names[i] for i in idx]}")  # noqa: T201
+        return subsets
 
     def _collect_object_tracking_errors(self):
         """Collect per-step object position and orientation errors (ref vs simulated)."""
@@ -518,81 +692,7 @@ class ImEvalCallback(TrainerCallback):
                     f"!!!!!!! {len(self.pred_pos_all)} {len(self.gt_pos_all)} {self.env.start_idx} {self.args.global_rank} Time: {datetime.now().strftime('%H:%M:%S')}"
                 )
 
-                if hasattr(self.env, "motion_command"):
-                    body_names = self.env.motion_command.cmd_body_names
-                else:
-                    print("No self.env.motion_command.cmd_body_names found!!!!")
-                    exit()
-
-                """
-                # gear_sonic/config/manager_env/commands/terms/motion.yaml
-                body_names: [
-                    "pelvis",
-                    "left_hip_roll_link",
-                    "left_knee_link",
-                    "left_ankle_roll_link",
-                    "right_hip_roll_link",
-                    "right_knee_link",
-                    "right_ankle_roll_link",
-                    "torso_link",
-                    "left_shoulder_roll_link",
-                    "left_elbow_link",
-                    "left_wrist_yaw_link",
-                    "right_shoulder_roll_link",
-                    "right_elbow_link",
-                    "right_wrist_yaw_link",
-                ]
-                """
-
-                # Define subsets
-                # 6 + 3 + 5 = 14
-                legs_subset_names = [
-                    "left_hip_roll_link",
-                    "left_knee_link",
-                    "left_ankle_roll_link",
-                    "right_hip_roll_link",
-                    "right_knee_link",
-                    "right_ankle_roll_link",
-                ]
-                # NOTE use torso_link instead of head for vr_3points_subset_names
-                vr_3points_subset_names = [
-                    "torso_link",
-                    "left_wrist_yaw_link",
-                    "right_wrist_yaw_link",
-                ]
-                other_upper_bodies_subset_names = [
-                    "pelvis",
-                    "left_shoulder_roll_link",
-                    "left_elbow_link",
-                    "right_shoulder_roll_link",
-                    "right_elbow_link",
-                ]
-
-                foot_subset_names = ["left_ankle_roll_link", "right_ankle_roll_link"]
-
-                # Get indices for subsets
-                legs_indices = [body_names.index(name) for name in legs_subset_names]
-                vr_3points_indices = [body_names.index(name) for name in vr_3points_subset_names]
-                other_upper_bodies_indices = [
-                    body_names.index(name) for name in other_upper_bodies_subset_names
-                ]
-                foot_indices = [body_names.index(name) for name in foot_subset_names]
-                # Extract subset data
-                pred_pos_legs = [p[:, legs_indices, :] for p in self.pred_pos_all]
-                gt_pos_legs = [g[:, legs_indices, :] for g in self.gt_pos_all]
-
-                pred_pos_foot = [p[:, foot_indices, :] for p in self.pred_pos_all]
-                gt_pos_foot = [g[:, foot_indices, :] for g in self.gt_pos_all]
-
-                pred_pos_vr_3points = [p[:, vr_3points_indices, :] for p in self.pred_pos_all]
-                gt_pos_vr_3points = [g[:, vr_3points_indices, :] for g in self.gt_pos_all]
-
-                pred_pos_other_upper_bodies = [
-                    p[:, other_upper_bodies_indices, :] for p in self.pred_pos_all
-                ]
-                gt_pos_other_upper_bodies = [
-                    g[:, other_upper_bodies_indices, :] for g in self.gt_pos_all
-                ]
+                subsets = self._eval_body_subsets()
 
                 # Lazy import to avoid cffi version conflict with IsaacSim
                 from smpl_sim.smpllib.smpl_eval import compute_metrics_lite
@@ -600,27 +700,22 @@ class ImEvalCallback(TrainerCallback):
                 metrics_all = compute_metrics_lite(
                     self.pred_pos_all, self.gt_pos_all, concatenate=False
                 )  # list of length N_env
-                metrics_legs = compute_metrics_lite(pred_pos_legs, gt_pos_legs, concatenate=False)
-                metrics_vr_3points = compute_metrics_lite(
-                    pred_pos_vr_3points, gt_pos_vr_3points, concatenate=False
-                )
-                metrics_other_upper_bodies = compute_metrics_lite(
-                    pred_pos_other_upper_bodies, gt_pos_other_upper_bodies, concatenate=False
-                )
-                metrics_foot = compute_metrics_lite(pred_pos_foot, gt_pos_foot, concatenate=False)
 
-                # Rename keys for subset metrics
-                metrics_legs = {f"{k}_legs": v for k, v in metrics_legs.items()}
-                metrics_vr_3points = {f"{k}_vr_3points": v for k, v in metrics_vr_3points.items()}
-                metrics_other_upper_bodies = {
-                    f"{k}_other_upper_bodies": v for k, v in metrics_other_upper_bodies.items()
-                }
-                metrics_foot = {f"{k}_foot": v for k, v in metrics_foot.items()}
-
-                metrics_all.update(metrics_legs)
-                metrics_all.update(metrics_vr_3points)
-                metrics_all.update(metrics_other_upper_bodies)
-                metrics_all.update(metrics_foot)
+                # One loop replaces four near-identical hardcoded blocks. Insertion
+                # order follows _EVAL_SUBSET_ORDER so the metric column order in
+                # metrics_all_contactnate below is unchanged from when these were
+                # spelled out. A subset absent from `subsets` simply contributes no
+                # keys -- every downstream consumer derives its layout from
+                # len(metrics_all_sum), so nothing needs a fixed column count.
+                for subset_name, indices in subsets.items():
+                    pred_subset = [p[:, indices, :] for p in self.pred_pos_all]
+                    gt_subset = [g[:, indices, :] for g in self.gt_pos_all]
+                    subset_metrics = compute_metrics_lite(
+                        pred_subset, gt_subset, concatenate=False
+                    )
+                    metrics_all.update(
+                        {f"{k}_{subset_name}": v for k, v in subset_metrics.items()}
+                    )
 
                 metrics_all_sum = {
                     k: torch.tensor(

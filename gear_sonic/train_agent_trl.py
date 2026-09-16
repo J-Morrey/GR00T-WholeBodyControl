@@ -65,7 +65,7 @@ from gear_sonic.trl.utils.common import (
 )
 from gear_sonic.utils.common import seeding
 from gear_sonic.utils.config_utils import register_rl_resolvers
-from gear_sonic.utils.obs_utils import get_group_term_obs_shape
+from gear_sonic.utils.obs_utils import populate_env_obs_config
 
 register_rl_resolvers()
 
@@ -377,47 +377,10 @@ def main(config: OmegaConf):
         module_dim_dict = getattr(config.algo.config, "module_dim", {})
         policy_backbone_kwargs = {}
         critic_backbone_kwargs = {}
-        env.config["obs"]["obs_dims"]["actor_obs"] = env.env.observation_space["policy"].shape[-1]
-        env.config["obs"]["obs_dims"]["critic_obs"] = env.env.observation_space["critic"].shape[-1]
-        env.config["robot"]["algo_obs_dim_dict"]["actor_obs"] = env.env.observation_space[
-            "policy"
-        ].shape[-1]
-        env.config["robot"]["algo_obs_dim_dict"]["critic_obs"] = env.env.observation_space[
-            "critic"
-        ].shape[-1]
-        example_obs = env.reset(flatten_dict_obs=False)
-        for key in env.env.observation_space:
-            if key not in ["policy", "critic"]:
-                group_obs_dims, group_obs_names, group_obs_total_dim = get_group_term_obs_shape(
-                    example_obs, key
-                )
-                env.config["obs"]["group_obs_dims"][key] = group_obs_dims
-                env.config["obs"]["group_obs_names"][key] = group_obs_names
-                env.config["obs"]["obs_dims"][key] = group_obs_total_dim
-                env.config["robot"]["algo_obs_dim_dict"][key] = group_obs_total_dim
-        if config.manager_env.config.get("meta_action_dim", None) is not None:
-            env.config["robot"]["actions_dim"] = config.manager_env.config.meta_action_dim
-        else:
-            env.config["robot"]["actions_dim"] = env.env.action_space.shape[-1]
-
-        # Per-term layout of the concatenated policy/critic groups. The loop above
-        # skips them (they arrive as flat tensors, so only their total width is
-        # recorded), but cross-embodiment alignment needs to know where each term
-        # sits inside the flat vector.
-        obs_manager = env.env.observation_manager
-        env.config["obs"]["group_term_layout"] = {
-            group: [
-                # int() because IsaacLab reports dims as numpy int64, which
-                # OmegaConf rejects as a non-primitive type.
-                [name, [int(d) for d in dim]]
-                for name, dim in zip(
-                    obs_manager.active_terms[group],
-                    obs_manager.group_obs_term_dim[group],
-                    strict=True,
-                )
-            ]
-            for group in ("policy", "critic")
-        }
+        # Shared with eval_agent_trl.py -- these keys are absent from every saved
+        # config.yaml and can only come from the live env, so both entry points
+        # must populate them the same way.
+        populate_env_obs_config(env)
 
         policy = custom_instantiate(
             config.algo.config.actor,

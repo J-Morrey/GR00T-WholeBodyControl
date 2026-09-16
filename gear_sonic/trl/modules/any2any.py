@@ -494,6 +494,29 @@ def align_tokenizer_group(
 # =============================================================================
 # Config g1-ification
 # =============================================================================
+def group_term_layout(env_config):
+    """Fetch the per-term policy/critic layout, with a pointed error if absent.
+
+    This key is populated at runtime from the live IsaacLab ObservationManager by
+    :func:`gear_sonic.utils.obs_utils.populate_env_obs_config`. It is never
+    present in a checkpoint's ``config.yaml``, which is saved unresolved and
+    before the env exists -- so a missing key means an entry point skipped that
+    call, not that the checkpoint is bad. Without this the failure surfaces as a
+    bare ``omegaconf ConfigAttributeError`` whose cause is unguessable from the
+    traceback, since the writer lives in a different file from the reader.
+    """
+    if "group_term_layout" not in env_config.obs:
+        raise RuntimeError(
+            "env_config.obs.group_term_layout is missing. Any2Any needs the live "
+            "per-term policy/critic observation layout, which is built from the "
+            "IsaacLab ObservationManager by "
+            "gear_sonic.utils.obs_utils.populate_env_obs_config(env) and is never "
+            "stored in a checkpoint's config.yaml. Call it after creating the env "
+            "and before instantiating the actor/critic."
+        )
+    return env_config.obs.group_term_layout
+
+
 def g1ify_env_config(env_config, num_source_wrist_slots: int = 6):
     """Return a copy of the target env_config presenting *source* dimensions.
 
@@ -516,7 +539,7 @@ def g1ify_env_config(env_config, num_source_wrist_slots: int = 6):
     cfg.obs.obs_dims["tokenizer"] = tok_total
     cfg.robot.algo_obs_dim_dict["tokenizer"] = tok_total
 
-    layouts = cfg.obs.group_term_layout
+    layouts = group_term_layout(cfg)
     for group, key in (("policy", "actor_obs"), ("critic", "critic_obs")):
         layout = build_layout([n for n, _ in layouts[group]], {n: tuple(d) for n, d in layouts[group]})
         aligned = aligned_group_dim(layout)
@@ -542,7 +565,7 @@ def g1ify_obs_dim_dict(obs_dim_dict, src_cfg):
 
 def target_layouts(env_config):
     """Extract the target robot's policy/critic term layouts from env_config."""
-    layouts = env_config.obs.group_term_layout
+    layouts = group_term_layout(env_config)
     return {
         group: build_layout(
             [n for n, _ in layouts[group]], {n: tuple(d) for n, d in layouts[group]}

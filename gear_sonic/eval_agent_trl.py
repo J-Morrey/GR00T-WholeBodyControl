@@ -247,10 +247,18 @@ def main(override_config: omegaconf.OmegaConf):
 
     import torch
 
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cudnn.deterministic = False
+    # Mirror train_agent_trl.py's gate so eval numerics match training. Kept in
+    # sync deliberately: TF32 carries ~1e-3 relative error, which is enough to
+    # flip an FSQ quantisation bin and change the decoded action discretely, so
+    # an eval running at different precision from its training run is not
+    # measuring the same policy.
+    _tf32 = os.environ.get("SONIC_DISABLE_TF32", "0") != "1"
+    torch.backends.cuda.matmul.allow_tf32 = _tf32
+    torch.backends.cudnn.allow_tf32 = _tf32
+    torch.backends.cudnn.deterministic = not _tf32
     torch.backends.cudnn.benchmark = False
+    if not _tf32:
+        torch.set_float32_matmul_precision("highest")
 
     unresolved_conf = omegaconf.OmegaConf.to_container(config, resolve=False)  # noqa: F841
     os.chdir(hydra.utils.get_original_cwd())
@@ -373,30 +381,11 @@ def main(override_config: omegaconf.OmegaConf):
     module_dim_dict = getattr(config.algo.config, "module_dim", {})
     policy_backbone_kwargs = {}
     critic_backbone_kwargs = {}
-    env.config["obs"]["obs_dims"]["actor_obs"] = env.env.observation_space["policy"].shape[-1]
-    env.config["obs"]["obs_dims"]["critic_obs"] = env.env.observation_space["critic"].shape[-1]
-    env.config["robot"]["algo_obs_dim_dict"]["actor_obs"] = env.env.observation_space[
-        "policy"
-    ].shape[-1]
-    env.config["robot"]["algo_obs_dim_dict"]["critic_obs"] = env.env.observation_space[
-        "critic"
-    ].shape[-1]
-    example_obs = env.reset(flatten_dict_obs=False)
-    for key in env.env.observation_space:
-        if key not in ["policy", "critic"]:
-            group_obs_dims, group_obs_names, group_obs_total_dim = (
-                obs_utils.get_group_term_obs_shape(example_obs, key)
-            )
-            env.config["obs"]["group_obs_dims"][key] = group_obs_dims
-            env.config["obs"]["group_obs_names"][key] = group_obs_names
-            env.config["obs"]["obs_dims"][key] = group_obs_total_dim
-            env.config["robot"]["algo_obs_dim_dict"][key] = group_obs_total_dim
-
-    meta_action_dim = env.config.get("meta_action_dim", None)
-    if meta_action_dim is not None and meta_action_dim > 0:
-        env.config["robot"]["actions_dim"] = meta_action_dim
-    else:
-        env.config["robot"]["actions_dim"] = env.env.action_space.shape[-1]
+    # Shared with train_agent_trl.py. This previously inlined a copy of the
+    # training-side block that had drifted: it set the obs dims but not
+    # obs.group_term_layout, so Any2Any checkpoints crashed here with an opaque
+    # "Missing key group_term_layout" from omegaconf.
+    obs_utils.populate_env_obs_config(env)
 
     policy = trl_utils_common.custom_instantiate(
         config.algo.config.actor,
