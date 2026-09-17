@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=r1-inspect
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=2
+#SBATCH --nodelist=zac
 #SBATCH --mem=8G
 #SBATCH --time=0:30:00
 #SBATCH --output=logs/r1-inspect-%j.out

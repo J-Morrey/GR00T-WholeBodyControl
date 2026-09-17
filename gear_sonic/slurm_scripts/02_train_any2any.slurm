@@ -1,12 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=r1-any2any
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=16
+#SBATCH --nodelist=zac
 #SBATCH --gres=gpu:1
 #SBATCH --mem=128G
 #SBATCH --time=7-00:00:00
 #SBATCH --output=logs/r1-any2any-%j.out
-# TODO: add --partition=<gpu partition> (and/or --nodelist=) for your cluster;
-# the example script pinned --nodelist=zac. `sinfo -o "%P %G %N"` lists them.
+# Pinned to zac: /scratch is node-local and only zac holds the dataset.
+# If zac's GPUs are named something other than the generic "gpu" resource,
+# `scontrol show node zac | grep Gres` gives the right --gres string.
 
 # G1 -> R1 transfer learning on the full filtered retargeted dataset.
 #
@@ -25,8 +27,14 @@ source "$HOME/repos/GR00T-WholeBodyControl/gear_sonic/slurm_scripts/env.sh"
 cd "$REPO"
 
 # Isaac Sim writes its shader/extension cache here and fetches missing pieces
-# over the network on a cold start. Keep it off a quota'd home directory, and
-# warm it once somewhere with internet access before relying on a compute node.
+# over the network on a cold start. It lives on zac's node-local scratch, which
+# means it cannot be warmed on the login node and copied over -- scratch is not
+# shared. Warm it in place instead, once, before the first real submission:
+#
+#   srun --nodelist=zac --gres=gpu:1 --pty bash
+#   # then run the smoke test from the header comment above
+#
+# If zac has no outbound internet this is where a cold run will hang.
 export OMNI_CACHE_ROOT=/scratch/$USER/ov_cache
 mkdir -p "$OMNI_CACHE_ROOT" "$RUN_LOGS" logs
 

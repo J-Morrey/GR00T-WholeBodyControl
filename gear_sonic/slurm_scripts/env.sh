@@ -1,13 +1,17 @@
 # Shared config for the R1 SLURM scripts. Sourced by every job; not submitted itself.
 #
 # EDIT THE PATHS IN THIS FILE ONLY -- the job scripts read everything from here.
+#
+# NOTE: every job is pinned to node zac via `#SBATCH --nodelist=zac`, because
+# /scratch is node-local and only zac's copy holds the dataset. Do not relax
+# that without first replicating $RAW to the other node's scratch.
 
 source /home/software/miniforge3/etc/profile.d/conda.sh && conda activate env_isaaclab
 
 # Repo checkout. Everything runs with this as cwd: the Hydra config defaults
 # (assetRoot, base_dir) and convert_soma_npz_to_motion_lib.py's DEFAULT_MJCF are
 # all relative paths, so running from anywhere else silently breaks them.
-export REPO=/home/$USER/research/GR00T-WholeBodyControl
+export REPO=$HOME/repos/GR00T-WholeBodyControl
 
 # filter_r1_retargeted.py does a bare `from filter_and_copy_bones_data import ...`
 # (filter_r1_retargeted.py:36), so its own directory has to be importable. Setting
@@ -33,3 +37,14 @@ export FILTERED=/scratch/$USER/seed/r1_filtered
 export RUN_LOGS=/scratch/$USER/seed/logs_rl
 
 export EXPERIMENT_NAME=sonic_r1_any2any_full_filtered
+
+# Guard against a job that somehow landed off zac: /scratch exists on every
+# node but is empty elsewhere, so without this the failure mode is a confusing
+# "0 clips" or an empty-glob motion lib rather than an obvious wrong-node error.
+if [ ! -d "$RAW" ]; then
+    echo "FATAL: $RAW not found on $(hostname)."
+    echo "       /scratch is node-local; this job must run on zac."
+    # `return` so that sourcing this file by hand on the login node (where
+    # zac's scratch is genuinely absent) complains instead of killing the shell.
+    return 1 2>/dev/null || exit 1
+fi

@@ -5,19 +5,28 @@
 #
 #   ./submit_all.sh                    # prep, then train
 #   ./submit_all.sh --train-only       # skip prep ($FILTERED already built)
+#
+# Both jobs carry `#SBATCH --nodelist=zac`; nothing here overrides that.
 
 set -euo pipefail
-cd "$(dirname "$0")"
-mkdir -p ../../logs
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+
+# The scripts' `#SBATCH --output=logs/...` paths are relative to the cwd at
+# submission time, not to the script's own location. Submitting from the repo
+# root is what makes them land in <repo>/logs/ -- from anywhere else Slurm
+# fails to open the output file and the job's stdout is silently lost.
+cd "$HERE/../.."
+mkdir -p logs
 
 if [ "${1:-}" = "--train-only" ]; then
     shift
-    sbatch 02_train_any2any.slurm "$@"
+    sbatch "$HERE/02_train_any2any.slurm" "$@"
 else
-    prep=$(sbatch --parsable 01_prepare_data.slurm)
+    prep=$(sbatch --parsable "$HERE/01_prepare_data.slurm")
     echo "prep job:  $prep"
     # afterok: training is never submitted if prep exits non-zero, so a failed
     # filter can't leave a GPU job training on a partial dataset.
-    train=$(sbatch --parsable --dependency=afterok:"$prep" 02_train_any2any.slurm "$@")
+    train=$(sbatch --parsable --dependency=afterok:"$prep" "$HERE/02_train_any2any.slurm" "$@")
     echo "train job: $train  (waits on $prep)"
 fi

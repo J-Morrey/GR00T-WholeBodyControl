@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=r1-prep-data
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=32
+#SBATCH --nodelist=zac
 #SBATCH --mem=64G
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/r1-prep-%j.out
