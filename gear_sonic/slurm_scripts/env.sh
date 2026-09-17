@@ -6,7 +6,53 @@
 # /scratch is node-local and only zac's copy holds the dataset. Do not relax
 # that without first replicating $RAW to the other node's scratch.
 
-source /home/software/miniforge3/etc/profile.d/conda.sh && conda activate env_isaaclab
+# --- conda ------------------------------------------------------------------
+# Do not simplify this back to `source conda.sh && conda activate env_isaaclab`.
+# That form produced, and the job died on:
+#   conda.sh: line 52: pop_var_context: head of shell_variables not a function context
+#
+# Line 52 is a `local` declaration inside conda's own `conda()` shell function.
+# `local` only fails that way when bash's function-context stack is already
+# inconsistent, which happens when a conda shell function is inherited as an
+# exported function (BASH_FUNC_conda%%) and then redefined by re-sourcing
+# conda.sh. The submitting shell had env_isaaclab active and Slurm's default
+# --export=ALL copies that environment -- functions included -- into the job.
+#
+# Two separate things then have to be fixed:
+#   1. clear the inherited conda state so conda.sh initialises from scratch
+#   2. run conda's machinery without `set -euo pipefail`, which it is not
+#      written to tolerate, and without `&&`, which made the warning fatal
+# Snapshot the strict flags so they can be put back afterwards.
+#
+# Do NOT snapshot with `_strict=$(set +o)` and `eval "$_strict"`. Bash disables
+# errexit inside command substitution, so that snapshot always reads back as
+# `set +o errexit` and restoring it silently switches `set -e` OFF for the whole
+# rest of the job -- the opposite of the intent, and invisible until something
+# fails without aborting. Read `$-` in the current shell instead.
+#
+# (`$-` also has no letter for pipefail, hence the separate probe. And note that
+# for the same reason you cannot verify errexit from inside `$(...)` either.)
+_restore=
+case $- in *e*) _restore="$_restore -e";; esac
+case $- in *u*) _restore="$_restore -u";; esac
+if set -o | grep -qE '^pipefail[[:space:]]+on'; then _restore="$_restore -o pipefail"; fi
+
+set +eu +o pipefail
+unset -f conda __conda_activate __conda_reactivate __conda_hashr 2>/dev/null
+unset CONDA_SHLVL CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER CONDA_EXE
+source /home/software/miniforge3/etc/profile.d/conda.sh
+conda activate env_isaaclab
+# Deliberately unquoted: the flags must word-split back into separate args.
+# shellcheck disable=SC2086
+[ -n "$_restore" ] && set $_restore
+unset _restore
+
+# Assert rather than trust: the warning above is noise on some conda versions
+# and fatal on others, so check the outcome instead of the exit status.
+if [ "${CONDA_DEFAULT_ENV:-}" != "env_isaaclab" ]; then
+    echo "FATAL: env_isaaclab not active (CONDA_DEFAULT_ENV='${CONDA_DEFAULT_ENV:-unset}')"
+    return 1 2>/dev/null || exit 1
+fi
 
 # Repo checkout. Everything runs with this as cwd: the Hydra config defaults
 # (assetRoot, base_dir) and convert_soma_npz_to_motion_lib.py's DEFAULT_MJCF are
