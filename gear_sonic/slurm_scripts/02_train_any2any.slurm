@@ -21,7 +21,7 @@
 #   sbatch 02_train_any2any.slurm num_envs=64 algo.config.num_learning_iterations=5
 
 set -euo pipefail
-source "$(dirname "$0")/env.sh"
+source "$HOME/repos/GR00T-WholeBodyControl/gear_sonic/slurm_scripts/env.sh"
 cd "$REPO"
 
 # Isaac Sim writes its shader/extension cache here and fetches missing pieces

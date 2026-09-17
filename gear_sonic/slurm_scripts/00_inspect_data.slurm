@@ -10,7 +10,7 @@
 # minutes into a GPU job. Run this first; it writes nothing.
 
 set -euo pipefail
-source "$(dirname "$0")/env.sh"
+source "$HOME/repos/GR00T-WholeBodyControl/gear_sonic/slurm_scripts/env.sh"
 cd "$REPO"
 
 echo "python: $(which python)"
