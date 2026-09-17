@@ -1,0 +1,107 @@
+# @package _global_
+# Spiking (SNN) counterpart of sonic_r1_small, trained FROM SCRATCH on R1.
+#
+# Identical to sonic_r1_small in every respect except that the encoders (and,
+# once `spiking_g1_dyn` is flipped, the action decoder) are SpikingJelly LIF
+# stacks unrolled over T sub-steps. Same observations, rewards, terminations,
+# events, motion data, PPO settings and layer widths, so the only variable is
+# spiking-vs-ANN.
+#
+# TEMPORAL SEMANTICS
+#   At env step t the model consumes the T consecutive steps ending at t,
+#   left-padded by repeating the earliest available step:
+#       T=5, step 7 -> [3,4,5,6,7];  step 3 -> [1,1,1,2,3]
+#
+# ROLLOUT/UPDATE PARITY -- read before changing anything here.
+#   PPO computes the action mean twice (collecting the rollout, and again in the
+#   update) and the two must agree bitwise, or the importance ratio and the KL
+#   driving the LR controller measure arithmetic instead of policy change. This
+#   repo has already lost a week to exactly that (a bf16 autocast that applied to
+#   the update path but not the rollout path; see config/algo/trl/ppo.yaml).
+#   The window is therefore ONE pure function called from ONE line, proven by
+#   gear_sonic/tests/test_spiking_windowing.py. Do not add a rollout-only fast
+#   path without extending that test. `bf16: false` is inherited and must stay.
+
+defaults:
+  # Absolute config-root path, not the `exp`-group-relative form the sibling
+  # configs use. Those are only ever loaded as the primary +exp=..., whereas this
+  # chains through sonic_r1_small, and a relative entry gets re-prefixed with this
+  # file's own directory at the second level.
+  - /exp/manager/universal_token/all_modes/sonic_r1_small
+  - _self_
+
+project_name: TRL_R1_Small_Spiking
+
+# Single source of truth for the window length. Referenced by BOTH
+# max_rollout_history and the backbone; SpikingActor raises at construction if
+# they ever disagree, because a mismatch would silently shorten the rollout
+# window relative to the update window.
+snn_T: 5
+
+# Shared spiking settings. v_threshold and norm are NOT free knobs: a naive
+# Linear+LIF stack measures firing rates [0.001, 0.000] by the second layer --
+# dead, no gradient, and training that silently does nothing. LayerNorm plus
+# v_threshold=0.5 measures [0.143, 0.153, 0.160] and stays healthy as weights
+# drift. norm=batch_norm is rejected in code: its running statistics differ
+# between rollout (model.eval()) and update (model.train()), which is the parity
+# bug above reintroduced by another route.
+snn_common:
+  neuron: LIFNode        # 0 parameters -> exact count parity with the ANN analogue
+  tau: 2.0
+  v_threshold: 0.5
+  v_reset: 0.0
+  detach_reset: true
+  surrogate: ATan
+  surrogate_alpha: 2.0
+  norm: layer_norm       # 'none' for the neuromorphic variant (needs init calibration)
+  backend: torch         # CuPy is not installed; optional ~2-3x on the LIF kernels
+
+algo:
+  config:
+    actor:
+      _target_: gear_sonic.trl.modules.spiking_actor_critic.SpikingActor
+      max_rollout_history: ${snn_T}
+      backbone:
+        _target_: gear_sonic.trl.modules.spiking_actor_critic.SpikingUniversalTokenModule
+        snn_T: ${snn_T}
+        encoders:
+          # Spiking. These are where the T axis is genuinely time: the window is a
+          # real observation history, not a repeated tick.
+          g1:
+            params:
+              _target_: gear_sonic.trl.modules.spiking_actor_critic.SpikingBaseModule
+              snn_T: ${snn_T}
+              snn_readout: rate   # bounded [0,1]; keeps the pre-FSQ latent in tanh's linear region
+              snn: ${snn_common}
+          teleop:
+            params:
+              _target_: gear_sonic.trl.modules.spiking_actor_critic.SpikingBaseModule
+              snn_T: ${snn_T}
+              snn_readout: rate
+              snn: ${snn_common}
+          smpl:
+            params:
+              _target_: gear_sonic.trl.modules.spiking_actor_critic.SpikingBaseModule
+              snn_T: ${snn_T}
+              snn_readout: rate
+              snn: ${snn_common}
+        # decoders: g1_dyn stays ANN for this first milestone (encoders-only), so
+        # the windowing and parity machinery is validated with the fewest moving
+        # parts. Flip to spiking only after the frozen-policy KL check passes --
+        # see the commented block below. g1_kin stays ANN permanently: it feeds
+        # the g1_recon auxiliary loss (coef 0.01) and is discarded at deployment.
+        #
+        #   decoders:
+        #     g1_dyn:
+        #       params:
+        #         _target_: gear_sonic.trl.modules.spiking_actor_critic.SpikingBaseModule
+        #         snn_T: ${snn_T}
+        #         snn_static_input: true   # no natural time axis -> T computation ticks
+        #         snn_readout: vmem        # continuous; a rate code at T=5 gives only
+        #                                  # 6 levels/channel, a ~0.35-sigma staircase
+        #                                  # against init_noise_std=0.05
+        #         snn: ${snn_common}
+
+    # critic: unchanged ANN. It is training-only and discarded at deployment, and
+    # a rate readout at T=5 would quantise the value function, degrading
+    # explained_variance and the advantage signal for no deployment benefit.

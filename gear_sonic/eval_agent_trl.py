@@ -614,11 +614,13 @@ def main(override_config: omegaconf.OmegaConf):
         envs_completed = torch.zeros(config.num_envs, dtype=torch.bool, device=device)
 
         with torch.no_grad():
+            policy_model = model.policy
+            value_model = model.value_model
+            # Outside the loop on purpose -- see the matching comment in
+            # ppo_trainer.py. Per-step init_rollout() caps the actor's observation
+            # history at one frame, which silently collapses a T-step window.
+            policy_model.init_rollout()
             while True:
-                policy_model = model.policy
-                value_model = model.value_model
-                policy_model.init_rollout()
-
                 actor_state = {}
                 actions = policy_model.rollout(obs_dict=obs_dict)
                 actor_state["actions"] = policy_model.action_mean.detach()

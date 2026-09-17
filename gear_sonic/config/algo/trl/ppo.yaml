@@ -7,7 +7,18 @@ num_ppo_epochs: ${algo.config.num_learning_epochs}
 num_mini_batches: ${algo.config.num_mini_batches}
 per_device_train_batch_size:
 gradient_accumulation_steps: 1
-report_to: none
+# Local TensorBoard event files for EVERY run, so metrics survive independently of
+# wandb (which is opt-in via use_wandb and off for headless/diagnostic launches).
+# This lives here rather than in a single exp config on purpose: it was previously
+# set only in sonic_r1_any2any.yaml, so the r1_small/spiking configs -- which chain
+# through sonic_r1, not the any2any one -- silently inherited `none` and a finished
+# 500-iteration run left behind nothing but checkpoints.
+#
+# NOTE: train_agent_trl.py must NOT pass sync_tensorboard=True to wandb.init while
+# this is on -- the two writers each advance wandb's step counter, which double-
+# counts every x-axis by 2x.
+report_to: tensorboard
+logging_dir: ${experiment_dir}/tensorboard
 gamma: ${algo.config.gamma}
 lam: ${algo.config.lam}
 vf_coef: ${algo.config.value_loss_coef}

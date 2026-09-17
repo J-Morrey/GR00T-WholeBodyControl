@@ -13,7 +13,11 @@
 # supported configuration rather than an invention.
 
 defaults:
-  - manager/universal_token/all_modes/sonic_r1
+  # Absolute config-root path so this file also resolves when it is itself pulled
+  # in as a default (sonic_r1_small_spiking chains through it). The `exp`-group-
+  # relative form the sibling configs use only works when the file is the primary
+  # +exp=...; at the second level it gets re-prefixed with its own directory.
+  - /exp/manager/universal_token/all_modes/sonic_r1
   - _self_
 
 project_name: TRL_R1_Small_Scratch

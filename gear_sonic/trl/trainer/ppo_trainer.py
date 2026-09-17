@@ -1861,6 +1861,35 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             self._grad_norm_accum = []
         metrics["diag/shuffle_advantages"] = float(self.shuffle_advantages)
 
+        # --- spiking-network health -----------------------------------------
+        # Per-layer firing rate, from the last forward of the update. A layer
+        # stuck at 0.0 emits no spikes, so no gradient reaches anything upstream
+        # of it and training silently does nothing -- and the reward curve gives
+        # no hint that this is why. `snn/firing_rate_min` is the one to alarm on.
+        # No-op for non-spiking models (the attribute simply does not exist).
+        backbone = getattr(self.policy_model, "actor_module", None)
+        if backbone is not None and hasattr(backbone, "spiking_firing_rates"):
+            all_rates = []
+            for module_name, rates in backbone.spiking_firing_rates().items():
+                short = module_name.split(".")[-1] or module_name
+                for i, rate in enumerate(rates):
+                    metrics[f"snn/firing_rate/{short}_L{i}"] = float(rate)
+                all_rates.extend(float(r) for r in rates)
+            # Drop non-finite entries before aggregating. An encoder that is never
+            # sampled in a batch (smpl is unused for R1 tracking) has its rate
+            # averaged over an EMPTY row selection, which is NaN -- and one NaN
+            # propagates through np.mean/min/max, silently turning all three
+            # summary curves into NaN for the entire run. The per-layer tags keep
+            # their NaN, which is the honest signal that the layer never ran;
+            # `snn/active_layers` says how many fed the aggregate.
+            finite = np.array([r for r in all_rates if np.isfinite(r)])
+            if finite.size:
+                metrics["snn/firing_rate_mean"] = float(finite.mean())
+                metrics["snn/firing_rate_min"] = float(finite.min())
+                metrics["snn/firing_rate_max"] = float(finite.max())
+                metrics["snn/dead_layer_frac"] = float(np.mean(finite < 1e-4))
+                metrics["snn/active_layers"] = float(finite.size)
+
         return metrics
 
     def train(self):
@@ -2538,11 +2567,15 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 self.accelerator,
                 gather_deepspeed3_params=self.args.ds3_gather_for_generation,
             ) as model:
+                policy_model = model.policy
+                # Outside the loop on purpose. init_rollout() clears the actor's
+                # observation buffer, so calling it per step would cap the history
+                # at one frame -- invisible at max_rollout_history=1, but it would
+                # silently reduce a T-step window to T copies of the current frame.
+                policy_model.init_rollout()
                 while True:
                     device = self.accelerator.device
-                    policy_model = model.policy
                     value_model = model.value_model  # noqa: F841
-                    policy_model.init_rollout()
 
                     policy_state_dict = {}  # noqa: F841
                     actor_state = {}
