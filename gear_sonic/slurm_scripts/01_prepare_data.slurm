@@ -11,6 +11,7 @@
 #
 # Branches on the layout that 00_inspect_data.slurm reports:
 #   npz         -> convert_soma_npz_to_motion_lib.py, then filter the result
+#   csv         -> convert_soma_r1_csv_to_motion_lib.py, then filter the result
 #   flat-pkl    -> filter_r1_retargeted.py    (single dir of <clip>.pkl)
 #   nested-pkl  -> filter_and_copy_bones_data.py (bones_xxx/ subdirs, parallel)
 #
@@ -35,27 +36,36 @@ fi
 
 # --- detect layout ----------------------------------------------------------
 first_npz=$(find "$RAW" -name '*.npz' -print -quit)
+first_csv=$(find "$RAW" -name '*.csv' -print -quit)
 first_flat_pkl=$(find "$RAW" -maxdepth 1 -name '*.pkl' ! -name 'metadata.pkl' -print -quit)
 first_any_pkl=$(find "$RAW" -name '*.pkl' ! -name 'metadata.pkl' -print -quit)
 
+# .pkl wins over a raw layout: a directory holding both is a conversion that has
+# already been run, so re-converting it would be wasted work at best.
 if [ -n "$first_npz" ] && [ -z "$first_any_pkl" ]; then
     LAYOUT=npz
+elif [ -n "$first_csv" ] && [ -z "$first_any_pkl" ]; then
+    LAYOUT=csv
 elif [ -n "$first_flat_pkl" ]; then
     LAYOUT=flat-pkl
 elif [ -n "$first_any_pkl" ]; then
     LAYOUT=nested-pkl
 else
-    echo "FATAL: no .npz or .pkl clips under $RAW"; exit 1
+    echo "FATAL: no .npz, .csv or .pkl clips under $RAW"; exit 1
 fi
 echo "detected layout: $LAYOUT"
 echo
 
-# --- step 1: convert, only if the source is raw SOMA .npz -------------------
-if [ "$LAYOUT" = npz ]; then
-    echo "=== converting .npz -> SONIC .pkl ==="
+# --- step 1: convert, only if the source is raw SOMA .npz or .csv ----------
+# Which retargeter produced $RAW decides the reader, not the contents: holosoma
+# / OmniRetarget emits MuJoCo qpos .npz, soma-retargeter emits flat .csv in cm
+# and degrees. Both converters write the same entry schema, so everything
+# downstream of $STAGE is identical either way.
+if [ "$LAYOUT" = npz ] || [ "$LAYOUT" = csv ]; then
+    echo "=== converting .$LAYOUT -> SONIC .pkl ==="
     if [ -d "$STAGE" ] && [ -n "$(ls -A "$STAGE" 2>/dev/null)" ]; then
         echo "reusing existing conversion at $STAGE"
-    else
+    elif [ "$LAYOUT" = npz ]; then
         # --mjcf is passed explicitly rather than relying on DEFAULT_MJCF
         # (convert_soma_npz_to_motion_lib.py:51), which is a repo-relative path.
         # The script validates joint order against this MJCF's actuators and
@@ -65,6 +75,20 @@ if [ "$LAYOUT" = npz ]; then
             --output "$STAGE" \
             --mjcf gear_sonic/data/assets/robot_description/mjcf/r1.xml \
             --num_workers "${SLURM_CPUS_PER_TASK:-16}"
+    else
+        # Same explicit --mjcf, same joint-order check -- here against the CSV
+        # header rather than a joint_names array.
+        #
+        # The CSVs carry no frame rate of their own; 120 fps is what
+        # soma-retargeter exports for BONES-SEED soma_uniform. Set SOURCE_FPS in
+        # env.sh if a run used anything else. Nothing is resampled here:
+        # motion_lib interpolates to its own target_fps (50) at load.
+        python gear_sonic/data_process/convert_soma_r1_csv_to_motion_lib.py \
+            --input "$RAW" \
+            --output "$STAGE" \
+            --mjcf gear_sonic/data/assets/robot_description/mjcf/r1.xml \
+            --num_workers "${SLURM_CPUS_PER_TASK:-16}" \
+            --source-fps "${SOURCE_FPS:-120}"
     fi
     FILTER_SRC=$STAGE
     # The converter writes one flat directory plus metadata.pkl.
