@@ -133,14 +133,27 @@ esac
 # /scratch is node-local.
 export CLUSTER_NODE=bowser
 
-# Width of the retargeting array, and the number of GPUs it will try to use at
-# once. The whole corpus is ~35 GPU-hours, so this divides the wall time: 2
-# shards on two Blackwells is ~10-13 h, 8 shards on one 4090 is ~4.4 h each.
+# Width of the retargeting array. Size this by the TIME LIMIT, not by the GPU
+# count. The corpus is ~35 GPU-hours on a 4090 and ~23 on a Blackwell, and
+# 11_retarget_r1.slurm asks for 12 h, so one task must cover at most a twelfth
+# of the work however many GPUs are free:
+#
+#     shards    per task, 4090    per task, Blackwell
+#        1          34.8 h              23.2 h        over the limit
+#        2          17.4 h              11.6 h        over / no margin
+#        4           8.7 h               5.8 h        ok
+#        8           4.3 h               2.9 h        ok
+#
+# Shards are not capped by GPUs. Slurm runs as many at once as there are free
+# GPUs and queues the rest, so an array wider than the node adapts on its own:
+# it uses a second GPU the moment someone else's job releases it, and a shard
+# that times out loses only its own remainder because make_retarget_shard.py
+# resumes. Oversharding is therefore the safe direction.
+#
 # submit_retarget.sh derives --array from this, so there is no second place to
-# keep in sync. Set it to the number of GPUs actually on $CLUSTER_NODE --
-# `scontrol show node $CLUSTER_NODE | grep Gres` -- since extra shards just
-# queue behind the ones that are running.
-export RETARGET_SHARDS=2
+# keep in sync. `scontrol show node $CLUSTER_NODE | grep -E 'Gres|AllocTRES'`
+# shows how many GPUs exist and how many are already taken.
+export RETARGET_SHARDS=8
 
 # joblib compression for the motion_lib PKLs. 3 cuts 86 GB to 30 GB at corpus
 # scale; 0 is faster to load. Mostly it is squeezing the all-zero smpl_joints.

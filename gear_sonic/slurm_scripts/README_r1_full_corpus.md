@@ -130,15 +130,32 @@ what makes the dataset visible off whichever node built it, but it also means
 
 ### 4. Pick the shard count
 
-One shard per GPU. The corpus is ~35 GPU-hours, so two Blackwells is ~10-13 h
-and one 4090 is ~35 h. Check what is there:
+Size it by the **time limit**, not the GPU count. Job 11 asks for 12 h, and the
+corpus is ~35 GPU-hours on a 4090 or ~23 on a Blackwell, so one task has to
+cover at most a twelfth of the work:
+
+| shards | per task, 4090 | per task, Blackwell | |
+|---|---|---|---|
+| 1 | 34.8 h | 23.2 h | over the limit |
+| 2 | 17.4 h | 11.6 h | over / no margin |
+| 4 | 8.7 h | 5.8 h | ok |
+| **8** | **4.3 h** | **2.9 h** | **default** |
+
+Shards are not capped by GPUs. Slurm runs as many concurrently as there are
+free GPUs and queues the rest, so an array wider than the node adapts by
+itself — it picks up a second GPU the moment another job releases one, and a
+shard that does time out loses only its own remainder, because
+`make_retarget_shard.py` resumes. Oversharding is the safe direction.
+
+See what the node has and what is already taken:
 
 ```bash
-scontrol show node $CLUSTER_NODE | grep -E 'Gres|CfgTRES'
+scontrol show node $CLUSTER_NODE | grep -E 'Gres|AllocTRES|State'
+squeue -w $CLUSTER_NODE -o '%.10i %.8u %.2t %.10M %.10L %.20b %R'
 ```
 
-More shards than GPUs is harmless — they just queue behind the running ones,
-and buy nothing.
+`%L` is time left on someone else's job — the limit minus elapsed, so an upper
+bound rather than a prediction.
 
 ---
 
