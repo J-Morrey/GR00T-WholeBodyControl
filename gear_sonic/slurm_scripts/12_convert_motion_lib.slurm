@@ -2,7 +2,10 @@
 #SBATCH --job-name=r1-motionlib
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=32
 #SBATCH --nodelist=zac
-#SBATCH --mem=64G
+#SBATCH --mem=32G
+# One worker holds one clip at a time -- a long one is ~10k frames x 186
+# floats, single-digit MB -- so 32 workers need nowhere near this. Generous
+# rather than measured, but it is one job, not an array reserving a multiple.
 #SBATCH --time=8:00:00
 #SBATCH --output=logs/r1-motionlib-%j.out
 

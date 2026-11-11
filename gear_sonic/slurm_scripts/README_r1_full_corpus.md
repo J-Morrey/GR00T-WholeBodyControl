@@ -141,6 +141,11 @@ cover at most a twelfth of the work:
 | 4 | 8.7 h | 5.8 h | ok |
 | **8** | **4.3 h** | **2.9 h** | **default** |
 
+Each task reserves its own CPUs and memory — `--mem` in a job array is per
+task, so 8 shards at 12 G reserve 96 G between them while they run. That is
+sized from a measured 1.5 GB peak RSS with ~8x headroom, not guessed, because
+over-reserving on a shared node denies memory to everyone else's jobs.
+
 Shards are not capped by GPUs. Slurm runs as many concurrently as there are
 free GPUs and queues the rest, so an array wider than the node adapts by
 itself — it picks up a second GPU the moment another job releases one, and a

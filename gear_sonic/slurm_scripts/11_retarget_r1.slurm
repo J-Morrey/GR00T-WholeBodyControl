@@ -3,7 +3,16 @@
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=8
 #SBATCH --nodelist=zac
 #SBATCH --gres=gpu:1
-#SBATCH --mem=48G
+#SBATCH --mem=12G
+# Per array task, not for the array as a whole: Slurm treats each task as its
+# own job, so N concurrent shards reserve N x this. Measured peak RSS is 1.5 GB
+# on the worst batch in a 1298-clip sample (the 10 largest clips, 195 MB of
+# BVH, which the size-descending sort makes batch 1). RSS tracks the batch's
+# BVH bytes at roughly 0.46 GB + 5 MB per MB, so even a corpus tail four times
+# heavier lands near 4.6 GB. 12 G is generous; it was 48 G, which reserved
+# memory other people's jobs on the node could have used. If a pathological
+# clip ever does OOM, lower batch_size in the generated config rather than
+# raising this.
 #SBATCH --time=12:00:00
 #SBATCH --array=0-1
 #SBATCH --output=logs/r1-retarget-%A_%a.out
