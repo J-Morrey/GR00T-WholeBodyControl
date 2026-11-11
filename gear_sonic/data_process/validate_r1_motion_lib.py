@@ -196,7 +196,9 @@ def main() -> int:
     dof_axis, joint_names, lower, upper = load_mjcf_joints(args.mjcf)
     print(f"{args.mjcf}: {len(joint_names)} DOF")
 
-    paths = sorted(p for p in args.input.glob("*.pkl") if p.name != "metadata.pkl")
+    # rglob: the converter mirrors its input layout, so a BONES-SEED run gives
+    # <session>/<clip>.pkl rather than a flat directory.
+    paths = sorted(p for p in args.input.rglob("*.pkl") if p.name != "metadata.pkl")
     if not paths:
         raise SystemExit(f"no clip PKLs under {args.input}")
     print(f"{len(paths)} clips under {args.input}")

@@ -74,7 +74,57 @@ export RAW=/scratch/$USER/seed/retarget
 export STAGE=/scratch/$USER/seed/r1_sonic_pkl
 
 # FILTERED: what training actually reads. Produced by 01_prepare_data.slurm.
-export FILTERED=/scratch/$USER/seed/r1_filtered
+# In HOME, not scratch, so the dataset is readable from any node rather than
+# only zac. Was /scratch/$USER/seed/r1_filtered when the data lived on scratch.
+export FILTERED=$HOME/seed/r1/filtered
+
+# --- retargeting (jobs 10-12) -----------------------------------------------
+# These three produce $FILTERED from raw BONES-SEED. Skip them entirely if you
+# already have retargeted clips.
+
+# Where soma_uniform.tar.gz lives -- either the HF tarballs or an
+# already-extracted tree; 10_extract_bvh.slurm detects which. This does NOT
+# have to be on the same filesystem as BVH_ROOT: home is the normal place for
+# it after moving the corpus between nodes, since only the 45 GB tarball has to
+# cross the network and the 295 GB it unpacks to stays on node-local scratch.
+export SEED_ROOT=$HOME/seed
+
+# Extracted soma_uniform BVH. The full corpus is ~295 GB unpacked (from a 45 GB
+# .tar.gz -- BVH is plain text and compresses hard), so this stays on scratch
+# and never goes near home.
+export BVH_ROOT=/scratch/$USER/seed/soma_uniform/bvh
+
+# Per-array-task symlink farms. Symlinks only, so a few MB.
+export SHARD_ROOT=/scratch/$USER/seed/shards
+
+# Retargeted output, in HOME for cross-node access. ~45 GB of CSV and ~30 GB of
+# compressed PKLs for the full corpus -- check your home quota before starting.
+export R1_CSV=$HOME/seed/r1/csv
+export R1_PKL=$HOME/seed/r1/motion_lib
+
+# soma-retargeter checkout. Must be on a branch carrying the unitree_r1 target
+# (assets/robotics/unitree/r1/) -- see the README section on getting it here.
+export SOMA_REPO=$HOME/repos/soma-retargeter
+
+# The node everything runs on. The job scripts still carry `#SBATCH
+# --nodelist=zac`, but submit_retarget.sh passes --nodelist on the command
+# line, which overrides the directive -- so this one variable moves the whole
+# pipeline to another node. Set it to whichever node holds the data, because
+# /scratch is node-local.
+export CLUSTER_NODE=bowser
+
+# Width of the retargeting array, and the number of GPUs it will try to use at
+# once. The whole corpus is ~35 GPU-hours, so this divides the wall time: 2
+# shards on two Blackwells is ~10-13 h, 8 shards on one 4090 is ~4.4 h each.
+# submit_retarget.sh derives --array from this, so there is no second place to
+# keep in sync. Set it to the number of GPUs actually on $CLUSTER_NODE --
+# `scontrol show node $CLUSTER_NODE | grep Gres` -- since extra shards just
+# queue behind the ones that are running.
+export RETARGET_SHARDS=2
+
+# joblib compression for the motion_lib PKLs. 3 cuts 86 GB to 30 GB at corpus
+# scale; 0 is faster to load. Mostly it is squeezing the all-zero smpl_joints.
+export PKL_COMPRESS=3
 
 # --- training output --------------------------------------------------------
 # Hydra's base_dir defaults to ./logs_rl (base.yaml:30), i.e. inside the repo.
@@ -87,7 +137,8 @@ export EXPERIMENT_NAME=sonic_r1_any2any_full_filtered
 # Guard against a job that somehow landed off zac: /scratch exists on every
 # node but is empty elsewhere, so without this the failure mode is a confusing
 # "0 clips" or an empty-glob motion lib rather than an obvious wrong-node error.
-if [ ! -d "$RAW" ]; then
+# Jobs 10-12 run before $RAW exists and source this with REQUIRE_RAW=0.
+if [ "${REQUIRE_RAW:-1}" = 1 ] && [ ! -d "$RAW" ]; then
     echo "FATAL: $RAW not found on $(hostname)."
     echo "       /scratch is node-local; this job must run on zac."
     # `return` so that sourcing this file by hand on the login node (where

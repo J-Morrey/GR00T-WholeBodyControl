@@ -118,9 +118,20 @@ def load_csv_clip(csv_path: Path, joint_names: list[str]) -> tuple[np.ndarray, n
 
 
 def convert_clip(
-    csv_path: Path, out_dir: Path, dof_axis: np.ndarray, joint_names: list[str], fps: int
+    csv_path: Path,
+    in_dir: Path,
+    out_dir: Path,
+    dof_axis: np.ndarray,
+    joint_names: list[str],
+    fps: int,
+    compress: int,
 ) -> tuple[str, int, float, int]:
     """Convert one CSV clip and write its PKL.
+
+    The output mirrors the input's directory structure, because that is what
+    soma-retargeter's own exporter does with the BONES-SEED
+    ``<session>/<clip>.bvh`` layout, and motion_lib globs ``**/*.pkl``
+    recursively anyway. A flat input directory still gives a flat output.
 
     Returns (name, num_frames, fps, num_clamped_dof_samples).
     """
@@ -143,7 +154,9 @@ def convert_clip(
         "smpl_joints": np.zeros((num_frames, NUM_SMPL_JOINTS, 3), dtype=np.float32),
         "fps": fps,
     }
-    joblib.dump({name: entry}, out_dir / f"{name}.pkl")
+    dst = out_dir / csv_path.relative_to(in_dir).with_suffix(".pkl")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump({name: entry}, dst, compress=compress)
     return name, num_frames, float(fps), num_clamped
 
 
@@ -160,6 +173,16 @@ def main() -> None:
         default=DEFAULT_SOURCE_FPS,
         help=f"frame rate the CSVs were exported at (default: {DEFAULT_SOURCE_FPS})",
     )
+    ap.add_argument(
+        "--compress",
+        type=int,
+        default=0,
+        help="joblib compression level 0-9 (default: 0, uncompressed). 3 cuts the "
+        "PKLs to ~35%% of their size for ~0.05 s/clip, which matters at corpus "
+        "scale: 86 GB -> 30 GB over all of BONES-SEED. Most of the saving is the "
+        "mandatory all-zero smpl_joints field. Costs decompression time at every "
+        "motion_lib load.",
+    )
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--limit", type=int, default=None, help="convert only the first N clips")
     ap.add_argument(
@@ -173,19 +196,31 @@ def main() -> None:
     dof_axis, joint_names = load_mjcf_dof_axes(args.mjcf)
     print(f"{args.mjcf}: {len(joint_names)} DOF")
 
-    clips = sorted(args.input.glob("*.csv"))
+    clips = sorted(args.input.rglob("*.csv"))
     if args.limit is not None:
         clips = clips[: args.limit]
     if not clips:
         raise SystemExit(f"no .csv files under {args.input}")
-    print(f"converting {len(clips)} clips @ {args.source_fps} fps -> {args.output}")
+    print(
+        f"converting {len(clips)} clips @ {args.source_fps} fps -> {args.output}"
+        + (f" (compress={args.compress})" if args.compress else "")
+    )
 
     args.output.mkdir(parents=True, exist_ok=True)
 
     metadata, failures, clamped = {}, [], 0
     with ProcessPoolExecutor(max_workers=args.num_workers) as pool:
         futures = {
-            pool.submit(convert_clip, c, args.output, dof_axis, joint_names, args.source_fps): c
+            pool.submit(
+                convert_clip,
+                c,
+                args.input,
+                args.output,
+                dof_axis,
+                joint_names,
+                args.source_fps,
+                args.compress,
+            ): c
             for c in clips
         }
         for i, future in enumerate(as_completed(futures), 1):
