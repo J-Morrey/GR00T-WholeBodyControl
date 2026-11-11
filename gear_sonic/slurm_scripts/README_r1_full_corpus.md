@@ -55,15 +55,36 @@ head -1 ~/repos/soma-retargeter/assets/robotics/unitree/r1/desc/r1_26dof_retarge
 
 ### 2. soma-retargeter itself
 
-Stage 2 runs soma-retargeter, which is a different repo and a different
-environment from `gear_sonic` — `uv`, not conda. On the HPC:
+Stage 2 runs soma-retargeter, which is a different repo **and a different
+interpreter**. It needs python >= 3.12 and `env_isaaclab` is 3.11, so it cannot
+share the SONIC environment — it has to have one of its own.
+
+The upstream way is `uv`, which installs per-user with no root and will fetch
+its own 3.12 if the system has none:
 
 ```bash
-git clone https://github.com/NVIDIA/soma-retargeter ~/repos/soma-retargeter
-cd ~/repos/soma-retargeter && uv sync          # needs uv on PATH
+curl -LsSf https://astral.sh/uv/install.sh | sh     # lands in ~/.local/bin
+export PATH="$HOME/.local/bin:$PATH"                # env.sh also adds this
+cd ~/repos/soma-retargeter && uv sync
 ```
 
-Do step 1's rsync *after* this clone, so it lands in a real checkout.
+If you would rather not add uv, any python 3.12 environment works — point
+`SOMA_PYTHON` in `env.sh` at its interpreter and nothing else changes:
+
+```bash
+conda create -y --prefix ~/envs/soma python=3.12
+conda run -p ~/envs/soma pip install -e ~/repos/soma-retargeter
+# in env.sh:
+export SOMA_PYTHON=$HOME/envs/soma/bin/python
+```
+
+`uv sync` honours `uv.lock`, so it reproduces the exact dependency set;
+`pip install -e` resolves afresh against the pins in `pyproject.toml`. Both
+work — the lockfile is just stricter.
+
+Job 11 pre-flights this by importing `newton`, `warp` and `soma_retargeter`
+through `$SOMA_PYTHON` and refuses to start if that fails, so a missing or
+wrong environment costs seconds rather than being discovered mid-array.
 
 Smoke-test it on an interactive GPU before committing 35 GPU-hours. This
 exercises the robot registry, the URDF load and the meshes — the three things

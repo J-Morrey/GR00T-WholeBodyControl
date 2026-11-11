@@ -41,6 +41,7 @@ echo "shard:   $SHARD of $NSHARD"
 echo "bvh:     $BVH_ROOT"
 echo "csv:     $R1_CSV"
 echo "soma:    $SOMA_REPO"
+echo "python:  $SOMA_PYTHON"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 echo
 
@@ -61,7 +62,26 @@ fi
     echo "       Check out the unitree-r1-target branch there."
     exit 1
 }
-command -v uv >/dev/null || { echo "FATAL: uv not on PATH; soma-retargeter needs it"; exit 1; }
+# Check that the interpreter can actually import the package, not merely that
+# some binary is on PATH. soma-retargeter needs python >= 3.12 and a working
+# newton/warp, neither of which `command -v` would notice. $SOMA_PYTHON is left
+# unquoted on purpose: it may be a wrapper like `uv run python` that has to
+# word-split.
+# shellcheck disable=SC2086
+# newton and warp rather than soma_retargeter alone: run from $SOMA_REPO the
+# package imports off the cwd whatever the interpreter, so importing it proves
+# nothing. The dependencies are what distinguish a prepared environment.
+if ! ( cd "$SOMA_REPO" && $SOMA_PYTHON -c "import newton, warp, soma_retargeter" ) >/dev/null 2>&1; then
+    echo "FATAL: SOMA_PYTHON ('$SOMA_PYTHON') cannot import soma_retargeter in $SOMA_REPO."
+    echo "       env_isaaclab is too old for it (needs python >= 3.12), so it"
+    echo "       needs an interpreter of its own. Either install uv:"
+    echo "         curl -LsSf https://astral.sh/uv/install.sh | sh"
+    echo "       or make an environment and point SOMA_PYTHON at it in env.sh:"
+    echo "         conda create -y --prefix \$HOME/envs/soma python=3.12"
+    echo "         conda run -p \$HOME/envs/soma pip install -e $SOMA_REPO"
+    echo "         export SOMA_PYTHON=\$HOME/envs/soma/bin/python"
+    exit 1
+fi
 
 mkdir -p "$R1_CSV" "$SHARD_ROOT"
 
@@ -100,7 +120,8 @@ JSON
 cd "$SOMA_REPO"
 echo
 echo "=== retargeting $todo clips ($(date -Is)) ==="
-srun uv run python app/bvh_to_csv_converter.py --config "$CONFIG"
+# shellcheck disable=SC2086
+srun $SOMA_PYTHON app/bvh_to_csv_converter.py --config "$CONFIG"
 
 # --- report -----------------------------------------------------------------
 # Counted from the shard rather than from $R1_CSV: the other array tasks are

@@ -106,6 +106,26 @@ export R1_PKL=$HOME/seed/r1/motion_lib
 # (assets/robotics/unitree/r1/) -- see the README section on getting it here.
 export SOMA_REPO=$HOME/repos/soma-retargeter
 
+# How to run python inside $SOMA_REPO. It cannot be this env: soma-retargeter
+# needs python >= 3.12 and env_isaaclab is older, so it has an interpreter of
+# its own.
+#
+# The default assumes uv, which is how the repo is set up upstream and which
+# fetches a 3.12 for itself if the system has none. If uv is not available,
+# point this at the interpreter of any environment where soma-retargeter is
+# installed, e.g.
+#     export SOMA_PYTHON=$HOME/envs/soma/bin/python
+export SOMA_PYTHON="${SOMA_PYTHON:-uv run python}"
+
+# A user-level `uv` installs here, and a Slurm batch script does not source
+# .bashrc. Jobs normally inherit PATH through --export=ALL, but only if it was
+# right in the submitting shell -- adding it here means the jobs do not depend
+# on that.
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+
 # The node everything runs on. The job scripts still carry `#SBATCH
 # --nodelist=zac`, but submit_retarget.sh passes --nodelist on the command
 # line, which overrides the directive -- so this one variable moves the whole
