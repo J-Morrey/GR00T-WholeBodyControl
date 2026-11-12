@@ -73,10 +73,32 @@ export RAW=/scratch/$USER/seed/retarget
 # .pkl. Ignored otherwise.
 export STAGE=/scratch/$USER/seed/r1_sonic_pkl
 
-# FILTERED: what training actually reads. Produced by 01_prepare_data.slurm.
-# In HOME, not scratch, so the dataset is readable from any node rather than
-# only zac. Was /scratch/$USER/seed/r1_filtered when the data lived on scratch.
+# FILTERED: the durable dataset, and what jobs 01 and 12 WRITE. In HOME, not
+# scratch, so it is readable from any node rather than only the one that built
+# it. Was /scratch/$USER/seed/r1_filtered when the data lived on scratch.
 export FILTERED=$HOME/seed/r1/filtered
+
+# TRAIN_MOTIONS: the copy training READS. Home is network-mounted, and the
+# motion library is brutal on it in two separate ways:
+#
+#   * at startup it globs the whole tree -- `glob.glob(.../**/*.pkl)` in
+#     motion_lib_base.py:378 -- regardless of MOTION_BUDGET, so all 129,785
+#     clips get stat'd before the first iteration. ~1 s against a warm local
+#     SSD; minutes over NFS, which is the gap after "Time taken for simulation
+#     start" where nothing is logged.
+#   * every 250 iterations ImResampleCallback rereads MOTION_BUDGET clips at
+#     random, so that cost is not paid once but for the life of the run.
+#
+# Both are random reads of small files, the worst case for NFS and the best
+# case for a local disk, so training reads a node-local copy instead. One bulk
+# sequential copy buys it. FILTERED stays the master; this is a cache, and
+# deleting it costs nothing but the next copy.
+#
+# Node-local means per-node: stage it on whichever node the job runs on, which
+# is $CLUSTER_NODE. 03_train_any2any_2gpu.slurm falls back to $FILTERED and
+# says so when this is missing, so an unstaged run still works, just slowly.
+#   rsync -a --info=progress2 "$FILTERED/" "$TRAIN_MOTIONS/"
+export TRAIN_MOTIONS=/scratch/$USER/seed/r1/filtered
 
 # --- retargeting (jobs 10-12) -----------------------------------------------
 # These three produce $FILTERED from raw BONES-SEED. Skip them entirely if you

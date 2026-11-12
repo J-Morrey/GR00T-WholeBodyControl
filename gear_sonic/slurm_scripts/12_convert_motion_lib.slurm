@@ -83,11 +83,18 @@ python gear_sonic/data_process/filter_and_copy_bones_data.py \
     --workers "${SLURM_CPUS_PER_TASK:-16}"
 
 # filter_and_copy_bones_data.py walks subdirectories and skips metadata.pkl, so
-# $FILTERED comes out without one. Without it the motion library opens all
-# ~130k clips at startup just to read their frame counts, because adaptive
-# sampling needs the lengths. Copying the unfiltered one is enough: metadata is
-# allowed to be a superset of what is on disk and the extra keys are ignored
-# (motion_lib_base.py:411).
+# $FILTERED comes out without one. Copying the unfiltered one is enough:
+# metadata is allowed to be a superset of what is on disk and the extra keys
+# are ignored (motion_lib_base.py:411).
+#
+# An earlier version of this comment claimed the motion library would otherwise
+# open all ~130k clips at startup to read their frame counts. That is wrong, and
+# worth stating plainly so the mistake is not reintroduced: the loader opens
+# each SAMPLED clip from its own file whether or not metadata exists
+# (motion_lib_base.py:1758, `if "path" in curr_file: joblib.load(...)`), and the
+# merged metadata fields are overwritten by what that load returns. Copying it
+# is cheap and keeps the directory self-describing, but it is not what makes
+# startup fast.
 cp "$R1_PKL/metadata.pkl" "$FILTERED/metadata.pkl"
 echo "copied metadata.pkl ($(python -c "import joblib,sys;print(len(joblib.load(sys.argv[1])))" "$FILTERED/metadata.pkl") entries)"
 

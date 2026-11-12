@@ -115,7 +115,6 @@ echo "job:      ${SLURM_JOB_ID:-interactive}"
 echo "cpus:     ${SLURM_CPUS_PER_TASK:-?}"
 echo "gpus:     ${CUDA_VISIBLE_DEVICES:-unset}  (requesting $TRAIN_GPUS processes)"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader | sed 's/^/          /'
-echo "motions:  $FILTERED"
 echo "logs:     $RUN_LOGS/TRL_R1_Any2Any"
 echo "run:      $EXPERIMENT_NAME_2GPU"
 echo "=============================================================="
@@ -132,13 +131,40 @@ echo
     exit 1
 }
 
-[ -d "$FILTERED" ] || {
-    echo "FATAL: $FILTERED missing -- run 12_convert_motion_lib.slurm (or 01_prepare_data.slurm)."
+# Prefer the node-local copy, fall back to the durable one in home. Staging is
+# optional -- an unstaged run is correct, just slow -- so this reports which it
+# picked rather than insisting.
+if [ -d "${TRAIN_MOTIONS:-}" ] && [ -n "$(ls -A "$TRAIN_MOTIONS" 2>/dev/null)" ]; then
+    MOTIONS=$TRAIN_MOTIONS
+    echo "motions:  $MOTIONS  (node-local copy)"
+else
+    MOTIONS=$FILTERED
+    echo "motions:  $MOTIONS  (shared home -- NOT staged)"
+    echo "          Startup globs every clip and each resample rereads"
+    echo "          MOTION_BUDGET of them, both over the network. Stage it with:"
+    echo "            rsync -a --info=progress2 \"$FILTERED/\" \"${TRAIN_MOTIONS:-/scratch/\$USER/seed/r1/filtered}/\""
+fi
+
+[ -d "$MOTIONS" ] || {
+    echo "FATAL: $MOTIONS missing -- run 12_convert_motion_lib.slurm (or 01_prepare_data.slurm)."
     exit 1
 }
 
-NCLIPS=$(find "$FILTERED" -name '*.pkl' ! -name 'metadata.pkl' | wc -l)
-[ "$NCLIPS" -gt 0 ] || { echo "FATAL: no clips in $FILTERED"; exit 1; }
+NCLIPS=$(find "$MOTIONS" -name '*.pkl' ! -name 'metadata.pkl' | wc -l)
+[ "$NCLIPS" -gt 0 ] || { echo "FATAL: no clips in $MOTIONS"; exit 1; }
+
+# A warning, not a failure. The loader works without metadata.pkl -- every
+# sampled clip is opened from its own file either way
+# (motion_lib_base.py:1758: `if "path" in curr_file: joblib.load(...)`), and the
+# metadata only merges extra per-clip fields that the load then overwrites. But
+# its absence is a good sign that a hand-staged copy caught only *.pkl and may
+# have missed other things too.
+[ -f "$MOTIONS/metadata.pkl" ] || {
+    echo "WARNING: no metadata.pkl in $MOTIONS."
+    echo "         Not fatal, but if you staged by hand, copy the whole"
+    echo "         directory rather than matching a pattern:"
+    echo "           rsync -a \"$FILTERED/\" \"$MOTIONS/\""
+}
 
 # wandb. use_wandb is true via opt/wandb and WandbCallback is in base.yaml's
 # defaults, so logging is on without anything being set here -- but only if this
@@ -265,7 +291,7 @@ exec accelerate launch \
     auto_load_latest=true \
     ++algo.config.max_grad_norm="$TRAIN_MAX_GRAD_NORM" \
     ++algo.config.num_learning_iterations="$TRAIN_ITERS" \
-    ++manager_env.commands.motion.motion_lib_cfg.motion_file="$FILTERED" \
+    ++manager_env.commands.motion.motion_lib_cfg.motion_file="$MOTIONS" \
     ++manager_env.commands.motion.motion_lib_cfg.override_num_motions_to_load="$BUDGET" \
     '++wandb.wandb_dir=${experiment_dir}/.wandb' \
     "$@"
