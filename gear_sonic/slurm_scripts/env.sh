@@ -186,12 +186,12 @@ fi
 # Number of GPUs, i.e. accelerate processes. Each one launches its own Isaac Sim
 # and its own copy of the motion library, so this multiplies both VRAM and host
 # RAM -- it is not a way to fit a bigger run on one card.
-export TRAIN_GPUS=2
+export TRAIN_GPUS="${TRAIN_GPUS:-2}"
 
 # Envs PER PROCESS, not in total. The upstream docs keep num_envs=4096 whether
 # they run on 1 GPU or 8 (docs/source/user_guide/training.md:125), so
 # TRAIN_GPUS=2 means 8192 envs overall and twice the rollout per PPO update.
-export TRAIN_NUM_ENVS=4096
+export TRAIN_NUM_ENVS="${TRAIN_NUM_ENVS:-4096}"
 
 # Clips held on the GPU at once. motion_lib_base.py:962 warns that leaving this
 # unset loads the whole corpus and "can OOM if the dataset is too large", which
@@ -227,21 +227,32 @@ export TRAIN_NUM_ENVS=4096
 #
 # The script prints the detected VRAM and refuses to start if the budget does
 # not fit, so raising this cannot silently OOM a run days in.
-export MOTION_BUDGET=120000
+export MOTION_BUDGET="${MOTION_BUDGET:-120000}"
 
 # PPO updates. 100000 is already ppo_im_phc.yaml's default; it is set here
 # explicitly so the run length is visible in one place rather than inherited.
 # Note these are UPDATES, not samples: at TRAIN_GPUS=2 each one consumes twice
 # the rollout a single-GPU iteration does, so this is not 100k of the iterations
 # plotted in the 1% run's wandb history.
-export TRAIN_ITERS=100000
+export TRAIN_ITERS="${TRAIN_ITERS:-100000}"
 
 # The one hyperparameter this pipeline overrides, and the reason is empirical,
 # not theoretical -- see the long comment in 03_train_any2any_2gpu.slurm before
 # changing it.
-export TRAIN_MAX_GRAD_NORM=2.0
+export TRAIN_MAX_GRAD_NORM="${TRAIN_MAX_GRAD_NORM:-2.0}"
 
 # Kept distinct from $EXPERIMENT_NAME (job 02) so the two never resume into each
 # other's directory. auto_load_latest globs on this name, so re-submitting the
 # same script continues the run; change the name to start a genuinely new one.
-export EXPERIMENT_NAME_2GPU=sonic_r1_any2any_full_gn20_2gpu
+export EXPERIMENT_NAME_2GPU="${EXPERIMENT_NAME_2GPU:-sonic_r1_any2any_full_gn20_2gpu}"
+
+# Note on the "${VAR:-default}" form above: it lets a value already in the
+# environment win, so a one-off run can be scoped to the submit line without
+# editing this file. sbatch's default --export=ALL carries the submitting
+# shell's environment into the job, so
+#
+#     MOTION_BUDGET=512 TRAIN_ITERS=5 sbatch 03_train_any2any_2gpu.slurm
+#
+# does what it looks like. This matters most for the smoke test: at the default
+# budget the loader would spend ~28 minutes reading clips before the first
+# iteration, which does not fit in a short test allocation.
