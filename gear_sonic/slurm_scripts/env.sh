@@ -212,12 +212,22 @@ export TRAIN_NUM_ENVS=4096
 # leave ~2 GB spare:
 #
 #     VRAM    clips
-#     24 GB    8192     (the default; ~5.3 GB of motions)
+#     24 GB    8192     (~5.3 GB of motions)
 #     48 GB   40000
-#     96 GB   120000    i.e. the whole corpus, resampling off
+#     96 GB   120000    the default -- bowser's two RTX PRO 6000 Blackwells
+#                       report 97887 MiB each, which fits the whole corpus
 #
-# The script prints the detected VRAM and warns if the budget does not fit.
-export MOTION_BUDGET=8192
+# Prefer a budget AT OR ABOVE the corpus size to one just under it. The two
+# branches cost very different amounts: at or above, the loader takes the
+# load-all path once and resampling is a no-op, so the (slow) load is paid a
+# single time at startup. Below, every 250 iterations pays it again -- and at
+# this budget that is tens of minutes of reload per resample, which would
+# dominate the run. A small budget is cheap to redraw and a large one is cheap
+# because it never redraws; the expensive place is in between.
+#
+# The script prints the detected VRAM and refuses to start if the budget does
+# not fit, so raising this cannot silently OOM a run days in.
+export MOTION_BUDGET=120000
 
 # PPO updates. 100000 is already ppo_im_phc.yaml's default; it is set here
 # explicitly so the run length is visible in one place rather than inherited.

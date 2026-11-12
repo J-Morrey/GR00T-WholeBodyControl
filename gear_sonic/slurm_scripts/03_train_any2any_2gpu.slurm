@@ -3,7 +3,7 @@
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=32
 #SBATCH --nodelist=bowser
 #SBATCH --gres=gpu:2
-#SBATCH --mem=96G
+#SBATCH --mem=56G
 #SBATCH --time=14-00:00:00
 #SBATCH --output=logs/r1-any2any-2gpu-%j.out
 #SBATCH --open-mode=append
@@ -128,13 +128,35 @@ fi
 
 # Motion budget vs. VRAM. ~15.5 GB is Isaac Sim with 4096 envs plus the network;
 # ~0.65 MB per clip is measured on the 1% set (see MOTION_BUDGET in env.sh).
-VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)
+#
+# --id=0 rather than querying every GPU and taking the first line with `head`.
+# That pipeline killed job 1486 on bowser, silently: `head -1` closes the pipe
+# after one line, the second GPU's row gives nvidia-smi a SIGPIPE, it exits 141,
+# `set -o pipefail` promotes that to the pipeline's status and `set -e` aborts
+# the script -- and bash prints nothing at all when it does. The log simply
+# stopped after the wandb line. It cannot happen on one GPU, where nvidia-smi
+# has written everything before head exits, which is why job 02 never hit it.
+VRAM_MB=$(nvidia-smi --id=0 --query-gpu=memory.total --format=csv,noheader,nounits)
 BUDGET=$MOTION_BUDGET
 if [ "$BUDGET" -gt "$NCLIPS" ]; then BUDGET=$NCLIPS; fi
 EST_MB=$(( 15500 + BUDGET * 65 / 100 ))
 echo "$NCLIPS clips available; loading $BUDGET at a time"
 if [ "$BUDGET" -lt "$NCLIPS" ]; then
     echo "  -> ImResampleCallback redraws the subset every 250 iterations"
+    # Measured on the 1% set: 1298 clips in ~18 s with 24 jobs, so ~72 clips/s.
+    RELOAD_S=$(( BUDGET / 72 ))
+    if [ "$RELOAD_S" -gt 120 ]; then
+        echo
+        echo "WARNING: that redraw reloads $BUDGET clips, about $(( RELOAD_S / 60 )) min, every 250"
+        echo "         iterations. This is the expensive middle: a budget just under the"
+        echo "         corpus pays a full load repeatedly without ever gaining the"
+        echo "         load-all shortcut. Go to one end instead --"
+        echo "           MOTION_BUDGET >= $NCLIPS  loads once, never redraws (needs"
+        echo "                                       ~$(( 15500 + NCLIPS * 65 / 100 )) MB of ${VRAM_MB} MB)"
+        echo "           MOTION_BUDGET ~= 8192       redraws in ~2 min, more churn but cheap"
+        echo "         Continuing in 20 s; Ctrl-C or scancel to change it."
+        sleep 20
+    fi
 else
     echo "  -> whole corpus fits; resampling is a no-op (all_motions_loaded)"
 fi
