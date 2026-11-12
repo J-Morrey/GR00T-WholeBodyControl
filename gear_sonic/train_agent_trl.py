@@ -18,6 +18,7 @@
 # gear_sonic/trl/ instead of the HuggingFace trl package. Replace with repo root.
 import sys
 import os
+import tempfile
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _repo_root = os.path.dirname(_script_dir)
 if _script_dir in sys.path:
@@ -280,7 +281,7 @@ def main(config: OmegaConf):
         )
 
         # AppLauncher can't handle multiple processes creating it at the same time so we need a lock
-        _lock_path = "/tmp/isaaclab_app_launcher.lock"
+        _lock_path = os.path.join(tempfile.gettempdir(), "isaaclab_app_launcher.lock")
         _local_rank = int(os.environ.get("LOCAL_RANK", 0))
         with FileLock(_lock_path):
             app_launcher = AppLauncher(args_cli)

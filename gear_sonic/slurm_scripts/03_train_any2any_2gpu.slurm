@@ -66,6 +66,41 @@ mkdir -p "$OMNI_CACHE_ROOT" "$RUN_LOGS" logs
 #     srun --nodelist=bowser --pty python -c "import isaacsim"
 export OMNI_KIT_ACCEPT_EULA=YES
 
+# Keep temp files out of the shared /tmp. IsaacLab's configure_logging() opens
+# os.path.join(tempfile.gettempdir(), "isaaclab", "logs") and, because
+# makedirs(exist_ok=True) happily succeeds on a directory someone else owns, the
+# failure surfaces only when it tries to create the file inside:
+#
+#     PermissionError: [Errno 13] Permission denied:
+#     '/tmp/isaaclab/logs/isaaclab_2026-11-12_17-15-00.log'
+#
+# which is what killed job 1488. bowser is shared, so /tmp/isaaclab belongs to
+# whoever ran IsaacLab on it first. tempfile.gettempdir() honours TMPDIR, so
+# pointing that at our own node-local scratch moves the whole tree somewhere we
+# certainly own -- no IsaacLab patch needed.
+#
+# Not per-job: one directory per user is enough to fix the collision, and two
+# jobs of the same user sharing it is harmless (log filenames are timestamped,
+# and sharing the AppLauncher lock just serialises their startups briefly).
+# A per-job directory would also leak, since the script ends in exec and so can
+# never run a cleanup trap.
+export TMPDIR=/scratch/$USER/tmp
+mkdir -p "$TMPDIR"
+
+# Assert it took. tempfile.gettempdir() only honours TMPDIR if the directory
+# exists AND is writable, and falls back to /tmp silently otherwise -- so a full
+# or unwritable scratch would put us straight back in the shared directory with
+# no hint in the log until the PermissionError. Checked rather than trusted,
+# since the failure it guards against is exactly the one that looks like it
+# cannot be happening.
+RESOLVED_TMP=$(python -c "import tempfile; print(tempfile.gettempdir())")
+if [ "$RESOLVED_TMP" != "$TMPDIR" ]; then
+    echo "FATAL: TMPDIR is $TMPDIR but python resolves tempdir to $RESOLVED_TMP."
+    echo "       It is missing, unwritable, or the filesystem is full:"
+    df -h "$TMPDIR" 2>&1 | sed 's/^/         /'
+    exit 1
+fi
+
 echo "=============================================================="
 echo "node:     $(hostname)"
 echo "python:   $(which python)"

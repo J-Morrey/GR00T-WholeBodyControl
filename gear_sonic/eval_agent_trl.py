@@ -36,6 +36,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 sys.path.append(os.getcwd())
 import logging
@@ -240,7 +241,7 @@ def main(override_config: omegaconf.OmegaConf):
         else:
             args_cli.kit_args = base_kit_args + f" --/renderer/activeGpu={render_gpu_idx}"
 
-        _lock_path = "/tmp/isaaclab_app_launcher.lock"  # noqa: S108
+        _lock_path = os.path.join(tempfile.gettempdir(), "isaaclab_app_launcher.lock")
         with filelock.FileLock(_lock_path):
             app_launcher = AppLauncher(args_cli)
         simulation_app = app_launcher.app  # noqa: F841
