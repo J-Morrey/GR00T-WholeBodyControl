@@ -278,7 +278,6 @@ echo
 # scripts second-guessing them.
 
 exec accelerate launch \
-    --multi_gpu \
     --num_processes="$TRAIN_GPUS" \
     --num_machines=1 \
     --mixed_precision=no \
