@@ -18,6 +18,8 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 import isaaclab.sim as sim_utils
 
+from gear_sonic.envs.manager_env.robots.usd_cache import usd_cache_dir
+
 ASSET_DIR = "gear_sonic/data/assets"
 
 # =============================================================================
@@ -159,6 +161,9 @@ R1_CFG = ArticulationCfg(
         fix_base=False,
         replace_cylinders_with_capsules=True,
         asset_path=f"{ASSET_DIR}/robot_description/urdf/r1/r1.urdf",
+        # IsaacLab otherwise writes this under a literal /tmp/IsaacLab,
+        # which on a shared node belongs to another user. See usd_cache.py.
+        usd_dir=usd_cache_dir("r1"),
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,

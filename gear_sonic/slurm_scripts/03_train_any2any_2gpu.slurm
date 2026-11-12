@@ -101,6 +101,13 @@ if [ "$RESOLVED_TMP" != "$TMPDIR" ]; then
     exit 1
 fi
 
+# Each rank converts the robot URDF into its own USD directory under $TMPDIR
+# every run (robots/usd_cache.py explains why it is per-run and not cached), so
+# without this they accumulate for as long as scratch is never cleared -- which
+# /tmp used to handle for us. A week is far longer than any run needs them.
+find "$TMPDIR/IsaacLab" -maxdepth 1 -name 'usd_*' -type d -mtime +7 \
+     -exec rm -rf {} + 2>/dev/null || true
+
 echo "=============================================================="
 echo "node:     $(hostname)"
 echo "python:   $(which python)"
