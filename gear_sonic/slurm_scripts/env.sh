@@ -214,20 +214,33 @@ export TRAIN_NUM_ENVS="${TRAIN_NUM_ENVS:-4096}"
 #     VRAM    clips
 #     24 GB    8192     (~5.3 GB of motions)
 #     48 GB   40000
-#     96 GB   120000    the default -- bowser's two RTX PRO 6000 Blackwells
-#                       report 97887 MiB each, which fits the whole corpus
+#     96 GB   120000
 #
 # Prefer a budget AT OR ABOVE the corpus size to one just under it. The two
 # branches cost very different amounts: at or above, the loader takes the
 # load-all path once and resampling is a no-op, so the (slow) load is paid a
-# single time at startup. Below, every 250 iterations pays it again -- and at
-# this budget that is tens of minutes of reload per resample, which would
-# dominate the run. A small budget is cheap to redraw and a large one is cheap
-# because it never redraws; the expensive place is in between.
+# single time at startup. Below, every 250 iterations pays it again. A small
+# budget is cheap to redraw and a large one is cheap because it never redraws;
+# the expensive place is in between.
 #
-# The script prints the detected VRAM and refuses to start if the budget does
-# not fit, so raising this cannot silently OOM a run days in.
-export MOTION_BUDGET="${MOTION_BUDGET:-120000}"
+# For THIS corpus, load-all is not available. Job 1487 counted 129,785 filtered
+# clips, which needs 15500 + 129785 * 0.65 = ~99,860 MB against the 97,887 MB
+# bowser's Blackwells report -- about 2 GB short. So resampling is mandatory and
+# the budget should sit at the cheap end rather than near the corpus size:
+#
+#     budget   reload    overhead at ~3 s/iteration (250 iters = ~12.5 min)
+#       4096     ~1 min     8%
+#       8192     ~2 min    15%     <- the default
+#      16384     ~4 min    30%
+#     120000    ~28 min    unusable
+#
+# at the ~72 clips/s measured on the 1% set. Raising
+# callbacks.im_resample.motion_resample_frequency from 250 halves the overhead
+# per doubling, at the cost of seeing new clips less often.
+#
+# The script prints the detected VRAM, refuses to start if the budget does not
+# fit, and warns if it lands in the expensive middle.
+export MOTION_BUDGET="${MOTION_BUDGET:-8192}"
 
 # PPO updates. 100000 is already ppo_im_phc.yaml's default; it is set here
 # explicitly so the run length is visible in one place rather than inherited.

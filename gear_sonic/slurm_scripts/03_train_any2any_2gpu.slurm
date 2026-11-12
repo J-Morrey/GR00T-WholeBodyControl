@@ -53,6 +53,19 @@ cd "$REPO"
 export OMNI_CACHE_ROOT=/scratch/$USER/ov_cache
 mkdir -p "$OMNI_CACHE_ROOT" "$RUN_LOGS" logs
 
+# Accept NVIDIA's Omniverse EULA without a prompt. isaacsim/kit/kit_app.py's
+# check_eula() takes y/yes/1 here, and otherwise calls input() -- which in a
+# batch job has no stdin, so it reads EOF and the rank dies with "Unable to
+# bootstrap inner kit kernel". That is what killed job 1487: the torch
+# ChildFailedError underneath it was only the launcher reporting the corpse.
+#
+# The same function writes site-packages/isaacsim/kit/EULA_ACCEPTED after an
+# interactive acceptance, which is why a workstation that has been used by hand
+# never prompts and a fresh cluster env always does. If you would rather accept
+# it yourself once and drop this line, that is equivalent:
+#     srun --nodelist=bowser --pty python -c "import isaacsim"
+export OMNI_KIT_ACCEPT_EULA=YES
+
 echo "=============================================================="
 echo "node:     $(hostname)"
 echo "python:   $(which python)"
