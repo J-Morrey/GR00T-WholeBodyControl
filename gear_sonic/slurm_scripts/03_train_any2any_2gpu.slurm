@@ -1,0 +1,218 @@
+#!/bin/bash
+#SBATCH --job-name=r1-any2any-2gpu
+#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=32
+#SBATCH --nodelist=bowser
+#SBATCH --gres=gpu:2
+#SBATCH --mem=96G
+#SBATCH --time=14-00:00:00
+#SBATCH --output=logs/r1-any2any-2gpu-%j.out
+#SBATCH --open-mode=append
+
+# G1 -> R1 any2any transfer on both of bowser's GPUs, for 100k PPO updates.
+#
+# Submit with (logs/ must exist BEFORE submitting -- Slurm opens the output file
+# itself and will not create the directory):
+#
+#     cd ~/repos/GR00T-WholeBodyControl/gear_sonic/slurm_scripts
+#     mkdir -p logs
+#     sbatch 03_train_any2any_2gpu.slurm
+#
+# Smoke test first. It exercises the checkpoint load, the G1<->R1 joint mapping,
+# the motion-lib glob and both ranks' DDP handshake in a couple of minutes:
+#
+#     sbatch --time=00:30:00 03_train_any2any_2gpu.slurm \
+#         num_envs=64 ++algo.config.num_learning_iterations=5
+#
+# Everything after the script name is appended to the Hydra command line, and
+# Hydra lets a later override win over an earlier one -- verified, not assumed --
+# so appending num_envs= or any other key already set below simply replaces it.
+#
+# Monitoring: wandb, project TRL_R1_Any2Any, run name "$EXPERIMENT_NAME_2GPU"
+# plus the launch timestamp. Only rank 0 opens the run (train_agent_trl.py:206
+# gates on accelerator.is_main_process), so two GPUs still produce one run, not
+# two. The run id is written to meta.yaml in the experiment dir and read back on
+# resume, so re-submitting after a crash continues the same wandb run rather
+# than starting a second one. Metrics arrive through WandbCallback.on_log with
+# an explicit step=global_step; sync_tensorboard is deliberately off, because
+# having both paths live made every metric land twice and advanced wandb's
+# internal _step at 2x the iteration count.
+
+set -euo pipefail
+
+# REQUIRE_RAW=0 because $RAW (/scratch/$USER/seed/retarget) is the OmniRetarget
+# layout that 01_prepare_data.slurm consumes. The soma-retargeter pipeline
+# (jobs 10-12) writes $FILTERED directly and never creates $RAW, so the guard at
+# the bottom of env.sh would abort this job over a directory it does not need.
+# $FILTERED is checked for real below.
+REQUIRE_RAW=0 source "$HOME/repos/GR00T-WholeBodyControl/gear_sonic/slurm_scripts/env.sh"
+cd "$REPO"
+
+# Isaac Sim's shader/extension cache. Both ranks share it, and on a cold cache
+# they will race to populate it and fetch the missing pieces over the network.
+# Warm it once with the smoke test above before starting a two-week run.
+export OMNI_CACHE_ROOT=/scratch/$USER/ov_cache
+mkdir -p "$OMNI_CACHE_ROOT" "$RUN_LOGS" logs
+
+echo "=============================================================="
+echo "node:     $(hostname)"
+echo "python:   $(which python)"
+echo "job:      ${SLURM_JOB_ID:-interactive}"
+echo "cpus:     ${SLURM_CPUS_PER_TASK:-?}"
+echo "gpus:     ${CUDA_VISIBLE_DEVICES:-unset}  (requesting $TRAIN_GPUS processes)"
+nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader | sed 's/^/          /'
+echo "motions:  $FILTERED"
+echo "logs:     $RUN_LOGS/TRL_R1_Any2Any"
+echo "run:      $EXPERIMENT_NAME_2GPU"
+echo "=============================================================="
+echo
+
+# --- pre-flight -------------------------------------------------------------
+# Every check here fails in under a second. Isaac Sim takes ~2 minutes to
+# initialise and a two-week allocation is not something to spend discovering a
+# missing file.
+
+[ -f sonic_release/last.pt ] || {
+    echo "FATAL: sonic_release/last.pt missing."
+    echo "       run: python gear_sonic/data_process/download_from_hf.py --training --no-smpl"
+    exit 1
+}
+
+[ -d "$FILTERED" ] || {
+    echo "FATAL: $FILTERED missing -- run 12_convert_motion_lib.slurm (or 01_prepare_data.slurm)."
+    exit 1
+}
+
+NCLIPS=$(find "$FILTERED" -name '*.pkl' ! -name 'metadata.pkl' | wc -l)
+[ "$NCLIPS" -gt 0 ] || { echo "FATAL: no clips in $FILTERED"; exit 1; }
+
+# wandb. use_wandb is true via opt/wandb and WandbCallback is in base.yaml's
+# defaults, so logging is on without anything being set here -- but only if this
+# node can authenticate. train_agent_trl.py:214 calls wandb.init() unguarded on
+# the main process, so a node with no credentials or no outbound route turns
+# into a retry loop two minutes into Isaac Sim startup instead of a clear error.
+#
+# Exit status only, never printing the key.
+if [ "${WANDB_MODE:-online}" != "disabled" ]; then
+    if python -c "import wandb,sys; sys.exit(0 if wandb.api.api_key else 1)" 2>/dev/null; then
+        echo "wandb:    authenticated, logging online to project TRL_R1_Any2Any"
+    else
+        echo "FATAL: wandb has no API key on $(hostname)."
+        echo "       fix it with ONE of:"
+        echo "         wandb login                     # writes ~/.netrc, do this once on the node"
+        echo "         export WANDB_API_KEY=...        # in your submit environment"
+        echo "       or run without it:"
+        echo "         WANDB_MODE=offline sbatch 03_train_any2any_2gpu.slurm"
+        echo "           -> buffers to \$experiment_dir/.wandb; 'wandb sync' it later"
+        echo "         WANDB_MODE=disabled sbatch 03_train_any2any_2gpu.slurm"
+        echo "           -> tensorboard only, under \$experiment_dir/tensorboard"
+        echo
+        echo "       NOTE: the wandb_tags: 'online'/'offline'/'disabled' key in"
+        echo "       config/opt/wandb.yaml is dead -- no Python reads it. WANDB_MODE"
+        echo "       is the only thing that actually switches mode."
+        exit 1
+    fi
+else
+    echo "wandb:    DISABLED by WANDB_MODE -- metrics go to tensorboard only"
+fi
+
+# Assert the allocation actually matches what accelerate is about to launch.
+# --gres=gpu:2 on a node whose GPUs are named something other than the generic
+# "gpu" resource silently yields fewer, and rank 1 would then land on rank 0's
+# card and OOM a day into the run rather than now.
+NGPU=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)
+if [ "$NGPU" -lt "$TRAIN_GPUS" ]; then
+    echo "FATAL: TRAIN_GPUS=$TRAIN_GPUS but only $NGPU GPU(s) visible."
+    echo "       check:  scontrol show node $CLUSTER_NODE | grep -E 'Gres|AllocTRES'"
+    exit 1
+fi
+
+# Motion budget vs. VRAM. ~15.5 GB is Isaac Sim with 4096 envs plus the network;
+# ~0.65 MB per clip is measured on the 1% set (see MOTION_BUDGET in env.sh).
+VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)
+BUDGET=$MOTION_BUDGET
+if [ "$BUDGET" -gt "$NCLIPS" ]; then BUDGET=$NCLIPS; fi
+EST_MB=$(( 15500 + BUDGET * 65 / 100 ))
+echo "$NCLIPS clips available; loading $BUDGET at a time"
+if [ "$BUDGET" -lt "$NCLIPS" ]; then
+    echo "  -> ImResampleCallback redraws the subset every 250 iterations"
+else
+    echo "  -> whole corpus fits; resampling is a no-op (all_motions_loaded)"
+fi
+echo "  estimated VRAM: ~${EST_MB} MB of ${VRAM_MB} MB per GPU"
+if [ "$EST_MB" -gt "$VRAM_MB" ]; then
+    echo
+    echo "FATAL: that does not fit. Lower MOTION_BUDGET (or TRAIN_NUM_ENVS) in env.sh."
+    exit 1
+fi
+echo
+
+# --- launch -----------------------------------------------------------------
+# No `srun`. accelerate forks the ranks itself, and wrapping it in a single
+# --ntasks=1 step only adds a layer of CPU-affinity binding between Slurm and
+# those forks. Single-node multi-GPU is accelerate's job; Slurm's job is the
+# allocation.
+#
+# No --mixed_precision either, deliberately. algo/trl/ppo.yaml sets bf16: false
+# and documents at length why: with bf16 the rollout policy and the policy PPO
+# evaluates during the update are not bit-identical, which puts a KL of ~0.0113
+# between the policy and itself -- above desired_kl, so the adaptive LR
+# controller steers on numerical noise. HF TrainingArguments derives
+# ACCELERATE_MIXED_PRECISION from that flag; passing --mixed_precision here
+# would override it from the command line and silently undo the fix.
+#
+# max_grad_norm IS overridden, and this is the one place where that is correct.
+# The warning in 02_train_any2any.slurm is about an earlier attempt that raised
+# actor_learning_rate 2e-5 -> 1e-4 AND max_grad_norm 0.1 -> 1.0 together, making
+# each update ~50x more aggressive; that run peaked around iteration 200 and
+# decayed. 2.0 with the learning rate left alone is a different change, and it
+# is the configuration of sonic_r1_any2any_weekend_filtered_gn20 -- the best run
+# to date, and the one the current 1% job has been climbing on for two days
+# (reward 13.15 -> 21.91, episode length 146.7 -> 231.8 over iterations
+# 750-1100). "gn20" is max_grad_norm=2.0, not 0.20.
+#
+# Nothing else is overridden. sonic_r1_any2any.yaml inherits the source
+# pretraining's PPO settings on purpose and records two runs wrecked by job
+# scripts second-guessing them.
+
+exec accelerate launch \
+    --multi_gpu \
+    --num_processes="$TRAIN_GPUS" \
+    --num_machines=1 \
+    --mixed_precision=no \
+    gear_sonic/train_agent_trl.py \
+    +exp=manager/universal_token/all_modes/sonic_r1_any2any \
+    experiment_name="$EXPERIMENT_NAME_2GPU" \
+    base_dir="$RUN_LOGS" \
+    num_envs="$TRAIN_NUM_ENVS" \
+    headless=True \
+    auto_load_latest=true \
+    ++algo.config.max_grad_norm="$TRAIN_MAX_GRAD_NORM" \
+    ++algo.config.num_learning_iterations="$TRAIN_ITERS" \
+    ++manager_env.commands.motion.motion_lib_cfg.motion_file="$FILTERED" \
+    ++manager_env.commands.motion.motion_lib_cfg.override_num_motions_to_load="$BUDGET" \
+    '++wandb.wandb_dir=${experiment_dir}/.wandb' \
+    "$@"
+
+# The single quotes above are load-bearing: ${experiment_dir} is a Hydra
+# interpolation, not a shell variable, and must reach Hydra unexpanded.
+#
+# It moves wandb's staging directory off opt/wandb.yaml's default of /tmp, whose
+# stated reason is "so that it will automatically be cleaned up". That is the
+# wrong trade for a fourteen-day job on a shared node: wandb buffers every
+# logged step there before syncing, and a /tmp that is small, full, or swept by
+# the node's cleaner mid-run takes the run's history with it. Under
+# $experiment_dir it sits on the same scratch as the checkpoints, and resuming
+# picks up the resumed run's directory because auto_load_latest rewrites
+# experiment_dir first.
+
+# Resuming: auto_load_latest resolves experiment_dir back to the newest
+# "$RUN_LOGS/TRL_R1_Any2Any/$EXPERIMENT_NAME_2GPU-*/last.pt"
+# (train_agent_trl.py:81-89) and prints "starting fresh" when there is none, so
+# re-running this script both starts the run and continues it. last.pt is
+# rewritten every 50 iterations (ModelSaveCallback.save_last_frequency), so a
+# node failure or a hit wall-clock costs at most 50 updates. meta.yaml carries
+# the wandb id, so the resumed run reports into the same wandb run rather than
+# starting a second one.
+#
+# Checkpoint disk: model_step_*.pt every 2000 iterations at ~469 MB = ~23 GB
+# over 100k updates, which is why $RUN_LOGS points at scratch and not the repo.

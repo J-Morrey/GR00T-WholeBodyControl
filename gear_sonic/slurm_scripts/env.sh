@@ -178,3 +178,60 @@ if [ "${REQUIRE_RAW:-1}" = 1 ] && [ ! -d "$RAW" ]; then
     # zac's scratch is genuinely absent) complains instead of killing the shell.
     return 1 2>/dev/null || exit 1
 fi
+
+# --- multi-GPU training (job 03) --------------------------------------------
+# Everything below is read only by 03_train_any2any_2gpu.slurm. Job 02 (single
+# GPU) is unaffected.
+
+# Number of GPUs, i.e. accelerate processes. Each one launches its own Isaac Sim
+# and its own copy of the motion library, so this multiplies both VRAM and host
+# RAM -- it is not a way to fit a bigger run on one card.
+export TRAIN_GPUS=2
+
+# Envs PER PROCESS, not in total. The upstream docs keep num_envs=4096 whether
+# they run on 1 GPU or 8 (docs/source/user_guide/training.md:125), so
+# TRAIN_GPUS=2 means 8192 envs overall and twice the rollout per PPO update.
+export TRAIN_NUM_ENVS=4096
+
+# Clips held on the GPU at once. motion_lib_base.py:962 warns that leaving this
+# unset loads the whole corpus and "can OOM if the dataset is too large", which
+# the full BONES-SEED set certainly is. Below the corpus size, ImResampleCallback
+# draws a fresh failure-weighted subset every 250 iterations
+# (config/callbacks/im_resample.yaml), so the policy still sees everything --
+# just not all at once. At or above the corpus size the loader takes the
+# load-all branch (motion_lib_base.py:966) and resampling becomes a no-op, so
+# any value is safe; it only ever costs memory.
+#
+# Sizing, measured on the running 1% job (4090, 4096 envs, 1298 clips = 471,417
+# frames at 50 fps, 16.4 GB of 24 GB used):
+#
+#     Isaac Sim + 4096 envs + network      ~15.5 GB   fixed
+#     motion library                        ~0.85 GB  ~1.8 KB/frame
+#
+# so roughly 0.65 MB per clip at the corpus's average 363 frames. Budgets that
+# leave ~2 GB spare:
+#
+#     VRAM    clips
+#     24 GB    8192     (the default; ~5.3 GB of motions)
+#     48 GB   40000
+#     96 GB   120000    i.e. the whole corpus, resampling off
+#
+# The script prints the detected VRAM and warns if the budget does not fit.
+export MOTION_BUDGET=8192
+
+# PPO updates. 100000 is already ppo_im_phc.yaml's default; it is set here
+# explicitly so the run length is visible in one place rather than inherited.
+# Note these are UPDATES, not samples: at TRAIN_GPUS=2 each one consumes twice
+# the rollout a single-GPU iteration does, so this is not 100k of the iterations
+# plotted in the 1% run's wandb history.
+export TRAIN_ITERS=100000
+
+# The one hyperparameter this pipeline overrides, and the reason is empirical,
+# not theoretical -- see the long comment in 03_train_any2any_2gpu.slurm before
+# changing it.
+export TRAIN_MAX_GRAD_NORM=2.0
+
+# Kept distinct from $EXPERIMENT_NAME (job 02) so the two never resume into each
+# other's directory. auto_load_latest globs on this name, so re-submitting the
+# same script continues the run; change the name to start a genuinely new one.
+export EXPERIMENT_NAME_2GPU=sonic_r1_any2any_full_gn20_2gpu
