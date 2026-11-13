@@ -198,6 +198,16 @@ def main(config: OmegaConf):
         config.algo.config.world_size = accelerator.num_processes
     seeding(config.seed)
 
+    # NCCL has to build its communicator before Isaac Sim touches CUDA. The
+    # carb.cudainterop plugin runs a P2P bandwidth test at app startup that
+    # leaves peer access enabled between both devices; after that, NCCL's own
+    # bootstrap dies with ncclUnhandledCudaError / Cuda failure
+    # 'invalid argument'. One collective here binds the communicator while the
+    # context is still clean, and every later collective reuses it.
+    if config.multi_gpu:
+        torch.distributed.all_reduce(torch.zeros(1, device=accelerator.device))
+        logger.info(f"NCCL warm-up ok on rank {accelerator.process_index}")
+
     meta_path = Path(config.experiment_dir) / "meta.yaml"
     if meta_path.exists():
         meta = yaml.safe_load(open(meta_path))

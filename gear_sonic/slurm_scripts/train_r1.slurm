@@ -3,20 +3,22 @@
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=32
 #SBATCH --nodelist=bowser
 #SBATCH --gres=gpu:2
-#SBATCH --mem=96G
+#SBATCH --mem=58G
 #SBATCH --time=14-00:00:00
 #SBATCH --output=logs/r1-train-%j.out
 
-# 1, not 2. Two ranks load and transplant the checkpoint fine, then die in
-# accelerator.wait_for_everyone() with ncclUnhandledCudaError / Cuda failure
-# 'invalid argument'. NCCL_P2P_DISABLE=1 does not help. Isaac Sim reports its
-# GPU as active index 0 in BOTH ranks, so rank 1's barrier(device_ids=[1])
-# likely names a device its context does not have. Unproven; NGPU=2 still
-# works from the submit line if you want to retry it.
-NGPU=${NGPU:-1}
-NUM_ENVS=${NUM_ENVS:-4096}
+NGPU=${NGPU:-2}
+NUM_ENVS=${NUM_ENVS:-4096}       # per process
 ITERS=${ITERS:-100000}
-CLIPS=${CLIPS:-8192}
+
+# Per process, and the binding constraint on this node -- bowser has 63 GB of
+# RAM against 2x98 GB of VRAM, so the motion library runs out of host memory
+# long before anything runs out of GPU. Every clip is deserialised into RAM and
+# handed to the parent through an mp.Manager queue, so it exists roughly twice
+# at the peak; 8192 clips on one rank peaked at 56.5 GB and was killed at the
+# first im_resample (iteration 250). Upstream's own default is min(num_envs,
+# 1024). Raise only with `sacct -j <id> --format=MaxRSS` in hand.
+CLIPS=${CLIPS:-2048}
 RUN=sonic_r1_any2any_full
 
 REPO=$HOME/repos/GR00T-WholeBodyControl
