@@ -7,10 +7,10 @@
 #SBATCH --time=14-00:00:00
 #SBATCH --output=logs/r1-train-%j.out
 
-NGPU=2
-NUM_ENVS=4096
-ITERS=100000
-CLIPS=8192
+NGPU=${NGPU:-2}
+NUM_ENVS=${NUM_ENVS:-4096}
+ITERS=${ITERS:-100000}
+CLIPS=${CLIPS:-8192}
 RUN=sonic_r1_any2any_full
 
 REPO=$HOME/repos/GR00T-WholeBodyControl
