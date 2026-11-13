@@ -7,7 +7,13 @@
 #SBATCH --time=14-00:00:00
 #SBATCH --output=logs/r1-train-%j.out
 
-NGPU=${NGPU:-2}
+# 1, not 2. Two ranks load and transplant the checkpoint fine, then die in
+# accelerator.wait_for_everyone() with ncclUnhandledCudaError / Cuda failure
+# 'invalid argument'. NCCL_P2P_DISABLE=1 does not help. Isaac Sim reports its
+# GPU as active index 0 in BOTH ranks, so rank 1's barrier(device_ids=[1])
+# likely names a device its context does not have. Unproven; NGPU=2 still
+# works from the submit line if you want to retry it.
+NGPU=${NGPU:-1}
 NUM_ENVS=${NUM_ENVS:-4096}
 ITERS=${ITERS:-100000}
 CLIPS=${CLIPS:-8192}
