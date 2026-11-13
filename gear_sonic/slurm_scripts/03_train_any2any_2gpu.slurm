@@ -64,6 +64,13 @@ mkdir -p "$OMNI_CACHE_ROOT" "$RUN_LOGS" logs
 # never prompts and a fresh cluster env always does. If you would rather accept
 # it yourself once and drop this line, that is equivalent:
 #     srun --nodelist=bowser --pty python -c "import isaacsim"
+# motion_lib_base.py:2184 ships each loaded clip back through a multiprocessing
+# queue, and torch's default file_descriptor sharing spends one fd per tensor.
+# At ~10 tensors a clip, MOTION_BUDGET=8192 wants ~80k against bowser's soft
+# limit of 1024, which fails as "Too many open files (24)" mid-load. The hard
+# limit is taken rather than a number, so this adapts to whatever a node allows.
+ulimit -n "$(ulimit -Hn)"
+
 export OMNI_KIT_ACCEPT_EULA=YES
 
 # Keep temp files out of the shared /tmp. IsaacLab's configure_logging() opens

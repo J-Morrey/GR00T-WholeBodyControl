@@ -24,6 +24,8 @@ conda activate env_isaaclab
 set -eo pipefail
 [ "${CONDA_DEFAULT_ENV:-}" = env_isaaclab ] || { echo "conda activate failed"; exit 1; }
 
+ulimit -n "$(ulimit -Hn)"                 # motion loaders pass one fd per tensor
+
 export OMNI_KIT_ACCEPT_EULA=YES          # batch jobs have no stdin to prompt on
 export TMPDIR=/scratch/$USER/tmp         # /tmp/isaaclab belongs to another user
 export OMNI_CACHE_ROOT=/scratch/$USER/ov_cache
