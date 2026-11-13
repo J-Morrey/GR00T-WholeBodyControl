@@ -8,7 +8,7 @@
 #SBATCH --output=logs/r1-train-%j.out
 
 NGPU=${NGPU:-2}
-NUM_ENVS=${NUM_ENVS:-4096}       # per process
+NUM_ENVS=${NUM_ENVS:-8192}       # per process
 ITERS=${ITERS:-100000}
 
 # Per process, and the binding constraint on this node -- bowser has 63 GB of
