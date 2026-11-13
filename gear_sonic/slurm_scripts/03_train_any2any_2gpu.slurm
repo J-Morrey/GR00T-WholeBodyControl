@@ -291,6 +291,7 @@ exec accelerate launch \
     auto_load_latest=true \
     ++algo.config.max_grad_norm="$TRAIN_MAX_GRAD_NORM" \
     ++algo.config.num_learning_iterations="$TRAIN_ITERS" \
+    ++manager_env.commands.motion.debug_vis=false \
     ++manager_env.commands.motion.motion_lib_cfg.motion_file="$MOTIONS" \
     ++manager_env.commands.motion.motion_lib_cfg.override_num_motions_to_load="$BUDGET" \
     '++wandb.wandb_dir=${experiment_dir}/.wandb' \
