@@ -207,6 +207,12 @@ teleop_vids/
 *.code-workspace
 # Motion/training data (large local datasets, not tracked in git)
 data/
+# ...except the robot descriptions under gear_sonic/data/assets/robot_description,
+# which are source and not data. `data/` excludes their parent directory, so a
+# `!` rule cannot re-include them; they are force-added instead (`git add -f`),
+# which is how the G1 and H2 descriptions are already tracked. The meshes go to
+# LFS via the *.STL rule in .gitattributes. A description that exists on one
+# workstation only is a robot nobody else can reproduce.
 bones_seed_smpl/
 sonic_release/
 # Training output logs

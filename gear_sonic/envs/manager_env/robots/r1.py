@@ -8,10 +8,11 @@ in place of ``*_wrist_yaw_link``, and ``head_yaw_link`` in place of ``head_link`
 Config overrides for those names live in
 ``config/exp/manager/universal_token/all_modes/sonic_r1.yaml``.
 
-Actuator gains, grouping and the standing pose come from a config that was
-tested in simulation on simple R1 locomotion policies
-(``holosoma/custom_assets/unitree.py::R1_CFG``), not from the G1 armature
-formula used in ``g1.py``/``h2.py``.
+Actuator gains, grouping, armature and effort limits are Unitree's own, from
+``unitree_rl_mjlab/src/assets/robots/unitree_r1/r1_constants.py`` -- the config
+behind the R1 locomotion policy they ship -- cross-checked against the gains
+their deploy stack writes to hardware in ``deploy/robots/r1/config``. They are
+not the G1 armature formula used in ``g1.py``/``h2.py``.
 """
 
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -135,25 +136,35 @@ R1_ISAACLAB_TO_MUJOCO_MAPPING = {
 # =============================================================================
 # Articulation
 # =============================================================================
-# Effort limits are the real motor torques from the MJCF `actuatorfrcrange`.
-# Exception: head_yaw reads 0.86 Nm in both the URDF and the MJCF while its
-# velocity limit is 11 rad/s -- an upstream data bug (the retargeted motions
-# drive head_yaw over [-1.455, 0] rad). It is raised to head_pitch's 33 Nm here.
+# The real motor torques, straight from the URDF; they agree with Unitree's own
+# effort_limit per actuator group in r1_constants.py.
+#
+# head_yaw really is 0.86 Nm. An earlier revision of this file raised it to
+# head_pitch's 33 Nm on the theory that 0.86 was an upstream typo. It is not:
+# unitree_ros 1c300a6 lowered it deliberately from 33/33.4 to 0.86/11 and made
+# the same change to the R1 A5, A7 and R1D descriptions, and hardware telemetry
+# in unitree_ros#161 reports head_yaw tau_est peaking at 0.81 Nm over 45 minutes
+# of teleoperation. Leaving it at 33 gave the policy 38x the torque the real
+# servo can deliver, on the one joint heavy enough to swing the head around.
 EFFORT_LEG = 60.0
 EFFORT_ANKLE = 50.0
 EFFORT_WAIST = 60.0
 EFFORT_SHOULDER = 60.0
 EFFORT_ARM_DISTAL = 33.0
-EFFORT_HEAD = 33.0
+EFFORT_HEAD_PITCH = 33.0
+EFFORT_HEAD_YAW = 0.86
 
-# Rotor inertia reflected at the joint. The holosoma config had these written out
-# but commented, so R1 was running with zero armature while G1 sets it on every
-# actuator group (0.0036-0.0251). Leaving it at zero makes a joint's effective
-# inertia just its link inertia -- R1's ankle_pitch_link is 0.071 kg -- so joint
-# accelerations blow up. That is what made the `feet_acc` reward (an L2 penalty on
-# ankle *joint* acceleration) ~10x larger on R1 than on G1 under the identical
-# -2.5e-6 weight the G1 release trained with. 0.01 is holosoma's own intended
-# value and sits inside G1's range.
+# Rotor inertia reflected at the joint. Unitree sets 0.01 on every R1 actuator
+# group in r1_constants.py and as the MJCF default, so this is their number, not
+# an estimate. Leaving it at zero makes a joint's effective inertia just its link
+# inertia -- R1's ankle_pitch_link is 0.071 kg -- so joint accelerations blow up.
+# That is what made the `feet_acc` reward (an L2 penalty on ankle *joint*
+# acceleration) ~10x larger on R1 than on G1 under the identical -2.5e-6 weight
+# the G1 release trained with.
+#
+# Unitree's MJCF default also carries damping=0.05 and frictionloss=0.2 per
+# joint, which this config does not model. 0.2 Nm is noise against a 33 Nm arm
+# but 23% of head_yaw's 0.86 Nm.
 ARMATURE = 0.01
 
 R1_CFG = ArticulationCfg(
@@ -220,16 +231,16 @@ R1_CFG = ArticulationCfg(
             ],
             effort_limit_sim=EFFORT_LEG,
             stiffness={
-                ".*_hip_yaw_joint": 150.0,
-                ".*_hip_roll_joint": 150.0,
-                ".*_hip_pitch_joint": 200.0,
-                ".*_knee_joint": 200.0,
+                ".*_hip_yaw_joint": 100.0,
+                ".*_hip_roll_joint": 100.0,
+                ".*_hip_pitch_joint": 100.0,
+                ".*_knee_joint": 100.0,
             },
             damping={
-                ".*_hip_yaw_joint": 5.0,
-                ".*_hip_roll_joint": 5.0,
-                ".*_hip_pitch_joint": 5.0,
-                ".*_knee_joint": 5.0,
+                ".*_hip_yaw_joint": 2.0,
+                ".*_hip_roll_joint": 2.0,
+                ".*_hip_pitch_joint": 2.0,
+                ".*_knee_joint": 2.0,
             },
             armature={
                 ".*_hip_yaw_joint": ARMATURE,
@@ -241,22 +252,32 @@ R1_CFG = ArticulationCfg(
         "feet": ImplicitActuatorCfg(
             joint_names_expr=[".*_ankle_pitch_joint", ".*_ankle_roll_joint"],
             effort_limit_sim=EFFORT_ANKLE,
-            stiffness={".*_ankle_pitch_joint": 20.0, ".*_ankle_roll_joint": 20.0},
-            damping={".*_ankle_pitch_joint": 4.0, ".*_ankle_roll_joint": 4.0},
+            stiffness={".*_ankle_pitch_joint": 40.0, ".*_ankle_roll_joint": 40.0},
+            damping={".*_ankle_pitch_joint": 2.0, ".*_ankle_roll_joint": 2.0},
             armature={".*_ankle_pitch_joint": ARMATURE, ".*_ankle_roll_joint": ARMATURE},
         ),
         "waist": ImplicitActuatorCfg(
             joint_names_expr=["waist_roll_joint", "waist_yaw_joint"],
             effort_limit_sim=EFFORT_WAIST,
-            stiffness={"waist_roll_joint": 20.0, "waist_yaw_joint": 20.0},
-            damping={"waist_roll_joint": 4.0, "waist_yaw_joint": 4.0},
+            stiffness={"waist_roll_joint": 100.0, "waist_yaw_joint": 100.0},
+            damping={"waist_roll_joint": 2.0, "waist_yaw_joint": 2.0},
             armature={"waist_roll_joint": ARMATURE, "waist_yaw_joint": ARMATURE},
         ),
+        # Unitree's locomotion policy does not drive the head, so there is no
+        # reference gain pair to copy. head_pitch is a 33 Nm joint and takes the
+        # distal-arm gains; head_yaw uses the kp 15 / kd 1 that unitree_ros#161
+        # reports running on real hardware under teleoperation. kp matters more
+        # here than elsewhere: at 0.86 Nm, kp 15 saturates the servo at 0.057 rad
+        # of tracking error, so the head is torque-limited on any fast reference
+        # and the policy needs to see that during training.
         "head": ImplicitActuatorCfg(
             joint_names_expr=["head_pitch_joint", "head_yaw_joint"],
-            effort_limit_sim=EFFORT_HEAD,
-            stiffness={"head_pitch_joint": 20.0, "head_yaw_joint": 20.0},
-            damping={"head_pitch_joint": 4.0, "head_yaw_joint": 4.0},
+            effort_limit_sim={
+                "head_pitch_joint": EFFORT_HEAD_PITCH,
+                "head_yaw_joint": EFFORT_HEAD_YAW,
+            },
+            stiffness={"head_pitch_joint": 20.0, "head_yaw_joint": 15.0},
+            damping={"head_pitch_joint": 1.0, "head_yaw_joint": 1.0},
             armature={"head_pitch_joint": ARMATURE, "head_yaw_joint": ARMATURE},
         ),
         "arms": ImplicitActuatorCfg(
@@ -277,16 +298,16 @@ R1_CFG = ArticulationCfg(
             stiffness={
                 ".*_shoulder_pitch_joint": 40.0,
                 ".*_shoulder_roll_joint": 40.0,
-                ".*_shoulder_yaw_joint": 40.0,
-                ".*_elbow_joint": 40.0,
-                ".*_wrist_roll_joint": 40.0,
+                ".*_shoulder_yaw_joint": 20.0,
+                ".*_elbow_joint": 20.0,
+                ".*_wrist_roll_joint": 20.0,
             },
             damping={
-                ".*_shoulder_pitch_joint": 10.0,
-                ".*_shoulder_roll_joint": 10.0,
-                ".*_shoulder_yaw_joint": 10.0,
-                ".*_elbow_joint": 10.0,
-                ".*_wrist_roll_joint": 10.0,
+                ".*_shoulder_pitch_joint": 2.0,
+                ".*_shoulder_roll_joint": 2.0,
+                ".*_shoulder_yaw_joint": 1.0,
+                ".*_elbow_joint": 1.0,
+                ".*_wrist_roll_joint": 1.0,
             },
             armature={
                 ".*_shoulder_pitch_joint": ARMATURE,
@@ -305,15 +326,17 @@ R1_CFG = ArticulationCfg(
 # =============================================================================
 # Radians of joint-target travel per unit policy output.
 #
-# Deliberately NOT derived via g1.py's `0.25 * effort_limit_sim / stiffness`.
-# That heuristic is calibrated to G1's armature-derived stiffnesses and does not
-# transfer to R1's tested gains -- it yields 1.25-1.88 rad for the feet/waist/
-# head/arms with the holosoma effort limits, or 0.075-0.10 rad for the legs with
-# the real MJCF torque limits. G1's own per-joint scales span 0.35-0.55, so R1
-# uses a flat value from the middle of that band.
+# This flat value predates the gains above, and is now the odd one out. With
+# Unitree's gains, g1.py's `0.25 * effort_limit_sim / stiffness` is no longer a
+# G1-specific heuristic on R1 -- it reproduces Unitree's own R1_ACTION_SCALE
+# exactly, because that is how r1_constants.py derives it: 0.15 legs and waist,
+# 0.3125 ankles, 0.375 shoulder pitch/roll, 0.4125 distal arm and head_pitch,
+# 0.0143 head_yaw. Switching to it is a training-config change and is left for
+# that pass; note that 0.4 currently gives head_yaw 28x the travel per unit
+# action that its torque can actually deliver.
 #
 # This is the first knob to touch if tracking is jittery (lower) or sluggish
-# (raise); the gains above were tuned for locomotion, not whole-body tracking.
+# (raise).
 R1_DEFAULT_ACTION_SCALE = 0.4
 
 R1_ACTION_SCALE = {
