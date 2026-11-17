@@ -42,8 +42,25 @@ critic_actions_history_length: 10
 
 manager_env:
   rewards:
+    # G1 and the SONIC release run this term at -2.5e-6 (10x the term default).
+    # The weight is shared, but the *realised* penalty is not: it is an L2 cost on
+    # ankle joint acceleration, so it scales with the ankle's dynamics. Measured
+    # Env/Episode_Reward/feet_acc on the 1% sample, 4096 envs:
+    #
+    #   old R1 gains (ankle kp 20), -2.5e-6   -0.0638   stable over 47k iters
+    #   Unitree gains (ankle kp 40), -2.5e-6  -0.1139   at iteration 300
+    #
+    # Doubling the ankle stiffness to Unitree's own value doubled the penalty, so
+    # keeping -2.5e-6 would silently retune the reward as a side effect of fixing
+    # the actuator model. -1.4e-6 = -2.5e-6 x (0.0638 / 0.1139) puts the realised
+    # cost back at the G1-calibrated level the armature fix had already matched.
+    #
+    # Caveat: the -0.1139 reading was still falling at iteration 300 while the
+    # baseline's was flat, so the true ratio may be nearer 1.6 than 1.8 and this
+    # may land slightly under G1's pressure. That is the safer side to err on for
+    # ankles we have just made stiffer.
     feet_acc:
-      weight: -2.5e-6
+      weight: -1.4e-6
     # G1 names: ["left_wrist_yaw_link", "right_wrist_yaw_link", "head_link"].
     # None of them exist on R1, and _get_body_indexes silently drops unknown
     # names -- an empty body list makes this reward NaN with no traceback.
