@@ -505,7 +505,36 @@ def main(override_config: omegaconf.OmegaConf):
             model.policy.actor_module, "encoders_to_iterate"
         )
 
-        if "tokenizer" in example_obs_dict and has_encoders:
+        actor_module = model.policy.actor_module
+        if has_actor_module and inference_helpers.is_any2any_module(actor_module):
+            # The network inside an Any2Any backbone is the *source* embodiment's;
+            # exporting through encode/decode would emit a graph in the source's
+            # joint layout and default-pose frame, which the robot cannot drive.
+            # These exports carry the alignment inside the graph instead, so they
+            # consume the target robot's own observations and emit its actions.
+            inference_helpers.export_any2any_encoders_as_onnx(
+                actor_module,
+                path=exported_policy_path,
+                exported_model_name=exported_onnx_name.replace(".onnx", "_encoder.onnx"),
+                batch_size=1,
+            )
+            inference_helpers.export_any2any_decoder_as_onnx(
+                actor_module,
+                decoder_name="g1_dyn",
+                path=exported_policy_path,
+                exported_model_name=exported_onnx_name.replace(".onnx", "_decoder.onnx"),
+                batch_size=1,
+            )
+            inference_helpers.export_any2any_policy_as_onnx(
+                actor_module,
+                decoder_name="g1_dyn",
+                path=exported_policy_path,
+                exported_model_name=exported_onnx_name.replace(".onnx", "_policy.onnx"),
+                batch_size=1,
+            )
+            inference_helpers.dump_any2any_layout(actor_module, exported_policy_path)
+
+        elif "tokenizer" in example_obs_dict and has_encoders:
 
             inference_helpers.export_universal_token_module_as_onnx(
                 model.policy.actor_module,
