@@ -1,0 +1,116 @@
+# @package _global_
+# sonic_r1_any2any with the motions the R1 provably cannot perform removed.
+#
+# Selected from the adaptive-sampling counters in
+# sonic_r1_any2any_full-20261116_232613/model_step_026000.pt (26,000 iterations,
+# 54.7M bin traversals over all 129,785 clips). The criterion is terminations per
+# 50-frame bin traversal -- length-normalised, so a long clip that falls once is
+# not penalised the way a short clip that always falls is. Everything listed runs
+# at >= 0.25, i.e. the policy falls at least once per 4 seconds of the clip, with
+# the worst at 1.29 (it dies within ~40 frames of entering any segment of it).
+#
+# Removed: 163 clips, 0.13% of the corpus, 0.23% of traversals -- but 4.1% of all
+# terminations. Removal is by prefix for whole families and by exact key for the
+# rest; load_data matches `remove_motion_keys` with str.startswith, and a key is a
+# prefix of itself.
+#
+# DELIBERATELY KEPT, although they also exceed 0.25: run_loop_180_R,
+# jog_high_knees_R_loop, jog_ff_loop_180_R_very_fast, jog_arc_cw_loop_R_very_fast,
+# avoid_obstacle_jump_run_ff_180_R. Locomotion is the skill we are training; these
+# are hard, not impossible, and deleting them would remove the difficulty we want.
+# Revisit them with reference-motion feasibility analysis (SIM2REAL_TODO.md 3.3)
+# rather than by deletion.
+#
+# NOTE: removing clips changes the corpus size, so the bin count changes and
+# motion_lib.load_state_dict drops the adaptive-sampling history on resume
+# (motion_lib_base.py:2455). The curriculum restarts from a uniform prior; the
+# policy, optimizer and step count resume normally.
+
+defaults:
+  - manager/universal_token/all_modes/sonic_r1_any2any
+  - _self_
+
+manager_env:
+  commands:
+    motion:
+      motion_lib_cfg:
+        remove_motion_keys:
+          # whole families (every clip whose key starts with these)
+          - "fall_spin_in_air"
+          - "flying_superman"
+          - "flying_wings"
+          - "jump_off_50cm"
+          - "jump_off_front_50cm"
+          - "jump_on_50cm"
+          - "mayahi"
+          - "swimming_breaststroke"
+          - "swimming_freestyle"
+          - "toe_touchers"
+          # individual clips from otherwise-usable families
+          # ab_bicycle
+          - "ab_bicycle_002__A360"
+          - "ab_bicycle_003__A360_M"
+          # count_it
+          - "count_it_001__A493"
+          # crouch_ff_loop_225
+          - "crouch_ff_loop_225_003__A146_M"
+          # crouch_ff_start_360
+          - "crouch_ff_start_360_002__A146"
+          - "crouch_ff_start_360_002__A146_M"
+          # crouch_ff_stop_180_R
+          - "crouch_ff_stop_180_R_102__A129_M"
+          # crouch_ff_stop_225
+          - "crouch_ff_stop_225_002__A146"
+          - "crouch_ff_stop_225_002__A146_M"
+          - "crouch_ff_stop_225_003__A146"
+          # dance_basic_cross_turn_full_R_fast
+          - "dance_basic_cross_turn_full_R_fast_002__A306_M"
+          # dance_take_the_l
+          - "dance_take_the_l_001__A464"
+          - "dance_take_the_l_001__A464_M"
+          # dance_western_cowboy_jumps_R
+          - "dance_western_cowboy_jumps_R_001__A310"
+          - "dance_western_cowboy_jumps_R_001__A310_M"
+          - "dance_western_cowboy_jumps_R_002__A309"
+          - "dance_western_cowboy_jumps_R_003__A308_M"
+          - "dance_western_cowboy_jumps_R_003__A310"
+          - "dance_western_cowboy_jumps_R_003__A310_M"
+          # dancing_routine_V001
+          - "dancing_routine_V001_001__A214"
+          - "dancing_routine_V001_001__A214_M"
+          - "dancing_routine_V001_001__A215"
+          - "dancing_routine_V001_001__A215_M"
+          - "dancing_routine_V001_001__A216"
+          - "dancing_routine_V001_001__A216_M"
+          - "dancing_routine_V001_001__A217"
+          - "dancing_routine_V001_001__A217_M"
+          - "dancing_routine_V001_001__A218"
+          - "dancing_routine_V001_001__A218_M"
+          # exercise_1
+          - "exercise_1_001__A117_M"
+          # exercise_2
+          - "exercise_2_002__A032"
+          - "exercise_2_003__A032"
+          # flip_from_wall
+          - "flip_from_wall_104__A304_M"
+          # horse_riding_R
+          - "horse_riding_R_001__A235"
+          # kneeling_stop
+          - "kneeling_stop_001__A022"
+          - "kneeling_stop_001__A022_M"
+          # leaning_idle
+          - "leaning_idle_001__A247"
+          - "leaning_idle_001__A247_M"
+          - "leaning_idle_002__A248"
+          - "leaning_idle_003__A246_M"
+          # mohak_turn_270
+          - "mohak_turn_270_002__A120_M"
+          # scissor_kick_R
+          - "scissor_kick_R_002__A361"
+          - "scissor_kick_R_003__A361"
+          - "scissor_kick_R_003__A361_M"
+          # stand_up_lying_side_R
+          - "stand_up_lying_side_R_002__A473_M"
+          - "stand_up_lying_side_R_002__A475"
+          # victory_dance_loser_jump_180_R
+          - "victory_dance_loser_jump_180_R_003__A308_M"
