@@ -1,5 +1,13 @@
 # @package _global_
-# sonic_r1_any2any with the motions the R1 provably cannot perform removed.
+# Motions the R1 provably cannot perform, removed from the training corpus.
+#
+# Composed on top of an exp config rather than inheriting from one:
+#   +exp=manager/universal_token/all_modes/sonic_r1_any2any +motion_filter=r1_impossible
+# A `defaults:` entry in a config that is itself reached through `defaults:`
+# resolves relative to that file's own directory, not the group root, so an
+# exp config inheriting from sonic_r1_any2any makes its `sonic_r1` default
+# resolve to .../all_modes/manager/universal_token/all_modes/sonic_r1 and fail.
+# This file has no defaults of its own, so it composes from anywhere.
 #
 # Selected from the adaptive-sampling counters in
 # sonic_r1_any2any_full-20261116_232613/model_step_026000.pt (26,000 iterations,
@@ -30,9 +38,6 @@
 # (motion_lib_base.py:2455). The curriculum restarts from a uniform prior; the
 # policy, optimizer and step count resume normally.
 
-defaults:
-  - manager/universal_token/all_modes/sonic_r1_any2any
-  - _self_
 
 manager_env:
   commands:

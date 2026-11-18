@@ -10,7 +10,7 @@
 # Resume an existing R1 Any2Any run with the impossible clips filtered out.
 #
 # Differences from train_r1.slurm:
-#   * +exp=...sonic_r1_any2any_filtered  -- drops the 163 clips the policy cannot
+#   * +motion_filter=r1_impossible -- drops the 173 clips the policy cannot
 #     do (see that config's header for the criterion and the measurement).
 #   * max_grad_norm 2.0 -> 1.0.
 #   * resume=true with an explicit checkpoint. resume_training() sets
@@ -53,7 +53,8 @@ echo "commit: $(git rev-parse --short HEAD) on $(git branch --show-current)"
 
 exec accelerate launch --num_processes=$NGPU \
     gear_sonic/train_agent_trl.py \
-    +exp=manager/universal_token/all_modes/sonic_r1_any2any_filtered \
+    +exp=manager/universal_token/all_modes/sonic_r1_any2any \
+    +motion_filter=r1_impossible \
     experiment_name=sonic_r1_any2any_full \
     base_dir="$LOGS" \
     num_envs=$NUM_ENVS \
