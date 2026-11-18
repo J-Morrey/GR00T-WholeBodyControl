@@ -9,10 +9,14 @@
 # at >= 0.25, i.e. the policy falls at least once per 4 seconds of the clip, with
 # the worst at 1.29 (it dies within ~40 frames of entering any segment of it).
 #
-# Removed: 163 clips, 0.13% of the corpus, 0.23% of traversals -- but 4.1% of all
+# Removed: 173 clips, 0.13% of the corpus, 0.23% of traversals -- but 4.1% of all
 # terminations. Removal is by prefix for whole families and by exact key for the
 # rest; load_data matches `remove_motion_keys` with str.startswith, and a key is a
-# prefix of itself.
+# prefix of itself. That also catches 10 `_M` mirrored siblings of named clips
+# (e.g. ab_bicycle_002__A360 also removes ..._M), which is intended -- a mirrored
+# copy of an impossible motion is equally impossible -- but it is why the count
+# is 173 against the 163 clips the measurement named. Verified against the real
+# corpus: 129,785 -> 129,612, no entry matching nothing.
 #
 # DELIBERATELY KEPT, although they also exceed 0.25: run_loop_180_R,
 # jog_high_knees_R_loop, jog_ff_loop_180_R_very_fast, jog_arc_cw_loop_R_very_fast,
